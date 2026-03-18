@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Föräldrapenning Planner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+  <style>
+    .parent-0 { --pc: #2563eb; --pbg: #eff6ff; --pborder: #bfdbfe; }
+    .parent-1 { --pc: #be185d; --pbg: #fdf2f8; --pborder: #fbcfe8; }
+    .bar { transition: width 0.3s ease; }
+    input[type="number"] { -moz-appearance: textfield; }
+    input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .tooltip { position: relative; }
+    .tooltip .tip { display: none; position: absolute; z-index: 50; bottom: 100%; left: 50%; transform: translateX(-50%);
+      background: #1e293b; color: white; padding: 6px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap; margin-bottom: 4px; }
+    .tooltip:hover .tip { display: block; }
+    .tl-arrow { transition: transform 0.15s; display: inline-block; }
+    .tl-arrow.open { transform: rotate(90deg); }
+    @media (max-width: 768px) { .desktop-only { display: none; } }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+
+<div class="max-w-7xl mx-auto px-4 py-6">
+  <header class="mb-8">
+    <div class="flex items-center gap-3 mb-2">
+      <div class="w-10 h-7 rounded overflow-hidden flex flex-col">
+        <div class="flex-1 bg-blue-600"></div>
+        <div class="h-[6px] bg-yellow-400"></div>
+        <div class="flex-1 bg-blue-600"></div>
+      </div>
+      <h1 class="text-2xl font-bold text-slate-900">Föräldrapenning Planner</h1>
+    </div>
+    <p class="text-slate-500 text-sm">Plan parental leave for two parents. Rules based on Försäkringskassan 2026.</p>
+  </header>
+
+  <div id="config-section"></div>
+  <div id="results-section"></div>
+</div>
+
+<script>
+const FK = {
+  SJUK_DAYS_TOTAL: 390,
+  LAGSTA_DAYS_TOTAL: 90,
+  SJUK_PER_PARENT: 195,
+  LAGSTA_PER_PARENT: 45,
+  RESERVED_SJUK: 90,
+  LAGSTA_DAILY: 180,
+  MIN_SJUK_DAILY: 250,
+  MAX_SJUK_DAILY: 1259,
+  MAX_SGI: 592000,
+  FIRST_SJUK_REQUIREMENT: 180,
+  SAVE_LIMIT_4YR: 96,
+  PRISBASBELOPP: 59200,
+};
+
+let _id = 0;
+function nextId() { return 'id' + (++_id) + '_' + Date.now().toString(36); }
+
+function defaultState() {
+  return {
+    children: [],
+    parents: [
+      { name: 'Parent 1', salary: 45000, topups: [] },
+      { name: 'Parent 2', salary: 40000, topups: [] },
+    ],
+    rules: [],
+  };
+}
+
+let state = defaultState();
+
+function saveState() {
+  try {
+    const json = JSON.stringify(state);
+    const compressed = LZString.compressToEncodedURIComponent(json);
+    history.replaceState(null, '', '#' + compressed);
+  } catch (e) { console.error('Save failed', e); }
+}
+
+function loadState() {
+  const hash = location.hash.slice(1);
+  if (!hash) return;
+  try {
+    const json = LZString.decompressFromEncodedURIComponent(hash);
+    if (json) {
+      const loaded = JSON.parse(json);
+      state = { ...defaultState(), ...loaded };
+      state.parents = state.parents || defaultState().parents;
+      state.children = (state.children || []).map(c => ({
+        ...c,
+        usedDays: c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }],
+      }));
+      state.rules = state.rules || [];
+    }
+  } catch (e) { console.error('Load failed', e); }
+}
+
+function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
+
+function monthName(m) {
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1];
+}
+
+function formatKr(n) {
+  return Math.round(n).toLocaleString('sv-SE');
+}
+
+function parseDate(s) {
+  if (!s) return null;
+  const [y, m, d] = s.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function dateToMonthKey(d) {
+  return d.getFullYear() * 100 + (d.getMonth() + 1);
+}
+
+function addMonths(dateStr, months) {
+  const d = parseDate(dateStr);
+  if (!d) return null;
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
+function calcDailyRate(monthlySalary) {
+  const sgi = Math.min(monthlySalary * 12, FK.MAX_SGI);
+  const rate = sgi * 0.97 * 0.80 / 365;
+  return Math.max(FK.MIN_SJUK_DAILY, Math.min(rate, FK.MAX_SJUK_DAILY));
+}
+
+function getSharedPoolRemaining(childId, consumed) {
+  const c = consumed[childId];
+  const sjukUsed = [c[0].sjuk, c[1].sjuk];
+  const lagstaUsed = [c[0].lagsta, c[1].lagsta];
+  const totalSjukUsed = sjukUsed[0] + sjukUsed[1];
+  const totalLagstaUsed = lagstaUsed[0] + lagstaUsed[1];
+  const maxPerParent = FK.SJUK_DAYS_TOTAL - FK.RESERVED_SJUK;
+  return [0, 1].map(pi => ({
+    sjuk: Math.max(0, Math.min(maxPerParent - sjukUsed[pi], FK.SJUK_DAYS_TOTAL - totalSjukUsed)),
+    lagsta: Math.max(0, FK.LAGSTA_DAYS_TOTAL - totalLagstaUsed),
+  }));
+}
+
+function calculateTimeline() {
+  if (!state.children.length) return { months: [], consumed: {}, warnings: [] };
+
+  let minDate = null, maxDate = null;
+  for (const c of state.children) {
+    if (c.birthDate) {
+      const d = parseDate(c.birthDate);
+      if (!minDate || d < minDate) minDate = new Date(d);
+    }
+  }
+  for (const r of state.rules) {
+    if (r.start) {
+      const d = parseDate(r.start);
+      if (!minDate || d < minDate) minDate = new Date(d);
+    }
+    if (r.end) {
+      const d = parseDate(r.end);
+      if (!maxDate || d > maxDate) maxDate = new Date(d);
+    }
+  }
+  if (!minDate) return { months: [], consumed: {}, warnings: [] };
+  if (!maxDate) {
+    maxDate = new Date(minDate);
+    maxDate.setFullYear(maxDate.getFullYear() + 2);
+  }
+
+  const months = [];
+  let y = minDate.getFullYear(), m = minDate.getMonth() + 1;
+  const ey = maxDate.getFullYear(), em = maxDate.getMonth() + 1;
+  while (y < ey || (y === ey && m <= em)) {
+    months.push({ year: y, month: m });
+    m++;
+    if (m > 12) { m = 1; y++; }
+  }
+
+  const consumed = {};
+  for (const c of state.children) {
+    const ud = c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    consumed[c.id] = [
+      { sjuk: ud[0].sjuk || 0, lagsta: ud[0].lagsta || 0 },
+      { sjuk: ud[1].sjuk || 0, lagsta: ud[1].lagsta || 0 },
+    ];
+  }
+
+  const topupMonths = [{}, {}];
+
+  const monthResults = months.map(({ year, month }) => {
+    const mStart = new Date(year, month - 1, 1);
+    const mEnd = new Date(year, month, 0);
+    const mDays = daysInMonth(year, month);
+
+    const parentResults = [0, 1].map(pi => {
+      let totalLeaveDays = 0;
+      let totalLeaveIncome = 0;
+      const leaveByChild = {};
+
+      const childIds = new Set(state.children.map(c => c.id));
+      const applicableRules = state.rules.filter(r =>
+        r.pi === pi && r.start && r.end && r.ci && childIds.has(r.ci)
+      );
+
+      const daysByChild = {};
+      for (const rule of applicableRules) {
+        const rStart = parseDate(rule.start);
+        const rEnd = parseDate(rule.end);
+        if (!rStart || !rEnd) continue;
+
+        const overlapStart = new Date(Math.max(mStart, rStart));
+        const overlapEnd = new Date(Math.min(mEnd, rEnd));
+        if (overlapStart > overlapEnd) continue;
+
+        const overlapDays = Math.round((overlapEnd - overlapStart) / 86400000) + 1;
+        const leaveDays = overlapDays / 7 * rule.dpw;
+
+        if (!daysByChild[rule.ci]) daysByChild[rule.ci] = 0;
+        daysByChild[rule.ci] += leaveDays;
+        if (!topupMonths[pi][rule.ci]) topupMonths[pi][rule.ci] = 0;
+      }
+
+      const sjukRate = calcDailyRate(state.parents[pi].salary);
+      for (const ci in daysByChild) {
+        const daysNeeded = daysByChild[ci];
+        const pool = getSharedPoolRemaining(ci, consumed);
+        const sjukRemaining = pool[pi].sjuk;
+        const lagstaRemaining = pool[pi].lagsta;
+        const totalChildSjuk = consumed[ci][0].sjuk + consumed[ci][1].sjuk;
+        const lagstaUnlocked = totalChildSjuk >= FK.FIRST_SJUK_REQUIREMENT;
+
+        const sjukDays = Math.min(daysNeeded, sjukRemaining);
+        const lagstaDays = lagstaUnlocked
+          ? Math.min(daysNeeded - sjukDays, lagstaRemaining)
+          : 0;
+        const totalDays = sjukDays + lagstaDays;
+
+        totalLeaveDays += totalDays;
+        totalLeaveIncome += sjukDays * sjukRate + lagstaDays * FK.LAGSTA_DAILY;
+
+        if (!leaveByChild[ci]) leaveByChild[ci] = { sjuk: 0, lagsta: 0 };
+        leaveByChild[ci].sjuk += sjukDays;
+        leaveByChild[ci].lagsta += lagstaDays;
+
+        consumed[ci][pi].sjuk += sjukDays;
+        consumed[ci][pi].lagsta += lagstaDays;
+      }
+
+      for (const ci in leaveByChild) {
+        if (leaveByChild[ci].sjuk > 0 || leaveByChild[ci].lagsta > 0) {
+          if (!topupMonths[pi][ci]) topupMonths[pi][ci] = 0;
+          topupMonths[pi][ci]++;
+        }
+      }
+
+      const avgDpw = mDays > 0 ? totalLeaveDays / (mDays / 7) : 0;
+      const salary = state.parents[pi].salary;
+
+      let fullyOffWork = false;
+      const monthMid = new Date(year, month - 1, 15);
+      for (const ci in leaveByChild) {
+        const child = state.children.find(ch => ch.id === ci);
+        if (child && child.birthDate) {
+          const firstBday = addMonths(child.birthDate, 12);
+          if (firstBday && monthMid < firstBday) {
+            fullyOffWork = true;
+            break;
+          }
+        }
+      }
+
+      const workFraction = fullyOffWork ? 0 : Math.max(0, (5 - Math.min(avgDpw, 5)) / 5);
+      const workIncome = workFraction * salary;
+
+      const leaveFrac = fullyOffWork ? 1 : Math.min(avgDpw, 5) / 5;
+      let topupIncome = 0;
+      for (const tu of state.parents[pi].topups) {
+        if (leaveByChild[tu.ci] && topupMonths[pi][tu.ci] <= tu.months) {
+          topupIncome += salary * (tu.pct / 100) * leaveFrac;
+        }
+      }
+
+      return {
+        leaveDays: totalLeaveDays,
+        leaveIncome: totalLeaveIncome,
+        workIncome,
+        topupIncome,
+        totalIncome: totalLeaveIncome + workIncome + topupIncome,
+        avgDpw,
+        leaveByChild,
+      };
+    });
+
+    return { year, month, parents: parentResults };
+  });
+
+  const warnings = generateWarnings(consumed, monthResults);
+
+  return { months: monthResults, consumed, warnings };
+}
+
+function generateWarnings(consumed, monthResults) {
+  const warnings = [];
+
+  for (const child of state.children) {
+    const c0 = consumed[child.id][0], c1 = consumed[child.id][1];
+    const totalSjukUsed = c0.sjuk + c1.sjuk;
+    const totalLagstaUsed = c0.lagsta + c1.lagsta;
+
+    if (totalSjukUsed > FK.SJUK_DAYS_TOTAL) {
+      warnings.push({ type: 'error', msg: `${child.name}: ${Math.round(totalSjukUsed)} sjukpenning days used, but only ${FK.SJUK_DAYS_TOTAL} available.` });
+    }
+    if (totalLagstaUsed > FK.LAGSTA_DAYS_TOTAL) {
+      warnings.push({ type: 'error', msg: `${child.name}: ${Math.round(totalLagstaUsed)} lägsta days used, but only ${FK.LAGSTA_DAYS_TOTAL} available.` });
+    }
+    for (let pi = 0; pi < 2; pi++) {
+      const used = consumed[child.id][pi].sjuk;
+      if (used < FK.RESERVED_SJUK && (totalSjukUsed + totalLagstaUsed) >= FK.SJUK_DAYS_TOTAL + FK.LAGSTA_DAYS_TOTAL - 1) {
+        warnings.push({ type: 'warn', msg: `${state.parents[pi].name} has only used ${Math.round(used)} sjukpenning days for ${child.name}. ${FK.RESERVED_SJUK} reserved days must be used by this parent.` });
+      }
+    }
+
+    if (child.birthDate) {
+      const bd = parseDate(child.birthDate);
+      const fourthBirthday = new Date(bd);
+      fourthBirthday.setFullYear(fourthBirthday.getFullYear() + 4);
+
+      const totalAvail = FK.SJUK_DAYS_TOTAL + FK.LAGSTA_DAYS_TOTAL;
+      const totalUsed = totalSjukUsed + totalLagstaUsed;
+      const remaining = totalAvail - totalUsed;
+
+      if (remaining > FK.SAVE_LIMIT_4YR) {
+        const mustUseBy4 = remaining - FK.SAVE_LIMIT_4YR;
+        const fourthStr = fourthBirthday.toISOString().slice(0, 10);
+        warnings.push({ type: 'warn', msg: `${child.name}: ${Math.round(remaining)} days remain. After ${fourthStr} (4th birthday), only ${FK.SAVE_LIMIT_4YR} can be saved. Use ${Math.round(mustUseBy4)} more days before then.` });
+      }
+    }
+  }
+
+  for (const mr of monthResults) {
+    for (let pi = 0; pi < 2; pi++) {
+      const pr = mr.parents[pi];
+      for (const ci in pr.leaveByChild) {
+        const child = state.children.find(c => c.id === ci);
+        if (!child || !child.birthDate) continue;
+        const bd = parseDate(child.birthDate);
+        const firstBirthday = new Date(bd);
+        firstBirthday.setFullYear(firstBirthday.getFullYear() + 1);
+        const monthDate = new Date(mr.year, mr.month - 1, 15);
+
+        if (monthDate >= firstBirthday && pr.avgDpw > 0 && pr.avgDpw < 5) {
+          warnings.push({
+            type: 'info',
+            msg: `${state.parents[pi].name} is taking ${pr.avgDpw.toFixed(1)} days/week in ${monthName(mr.month)} ${mr.year} (${child.name} is over 1). Taking fewer than 5 days/week after the child's first birthday may affect SGI protection.`,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  const seen = new Set();
+  return warnings.filter(w => {
+    if (seen.has(w.msg)) return false;
+    seen.add(w.msg);
+    return true;
+  });
+}
+
+// --- RENDERING ---
+
+function renderConfig() {
+  return `
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div class="space-y-6">
+        ${renderChildren()}
+        ${renderParents()}
+      </div>
+      <div class="space-y-6">
+        ${renderChildSetup()}
+        ${renderRules()}
+      </div>
+    </div>
+  `;
+}
+
+function renderChildren() {
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-slate-900">Children</h2>
+        <button onclick="actions.addChild()" class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white text-sm rounded-lg font-medium transition">+ Add child</button>
+      </div>
+      ${state.children.length === 0 ? '<p class="text-slate-400 text-sm italic">No children added yet. Add a child to start planning.</p>' : ''}
+      <div class="space-y-3">
+        ${state.children.map(c => `
+          <div class="flex items-center gap-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
+            <input type="text" value="${esc(c.name)}" placeholder="Name"
+              onchange="actions.updateChild('${c.id}','name',this.value)"
+              class="flex-1 px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
+            <input type="date" value="${c.birthDate || ''}"
+              onchange="actions.updateChild('${c.id}','birthDate',this.value)"
+              class="px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
+            <button onclick="actions.removeChild('${c.id}')" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderParents() {
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <h2 class="text-lg font-semibold text-slate-900 mb-4">Parents</h2>
+      <div class="space-y-4">
+        ${state.parents.map((p, pi) => `
+          <div class="p-4 rounded-lg border-2 parent-${pi}" style="background: ${pi === 0 ? '#eff6ff' : '#fdf2f8'}; border-color: ${pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-3 h-3 rounded-full" style="background: ${pi === 0 ? '#2563eb' : '#be185d'}"></div>
+              <input type="text" value="${esc(p.name)}" placeholder="Name"
+                onchange="actions.updateParent(${pi},'name',this.value)"
+                class="flex-1 px-2 py-1 border rounded text-sm font-medium bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}" />
+            </div>
+            <div class="flex items-center gap-2 mb-3">
+              <label class="text-xs text-slate-500 w-28">Monthly salary</label>
+              <input type="number" value="${p.salary}" step="1000" min="0"
+                onchange="actions.updateParent(${pi},'salary',Number(this.value))"
+                class="flex-1 px-2 py-1 border rounded text-sm bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}" />
+              <span class="text-xs text-slate-400">kr/mo</span>
+            </div>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xs text-slate-500">FK daily rate (sjukpenning): <strong>${formatKr(calcDailyRate(p.salary))} kr</strong></span>
+            </div>
+            <div class="mt-3 border-t pt-3" style="border-color: ${pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-medium text-slate-600">Company top-ups</span>
+                <button onclick="actions.addTopup(${pi})" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Add</button>
+              </div>
+              ${p.topups.map((tu, ti) => `
+                <div class="flex items-center gap-2 mb-1.5 text-xs">
+                  <select onchange="actions.updateTopup(${pi},${ti},'ci',this.value)"
+                    class="px-1 py-0.5 border border-slate-300 rounded bg-white text-xs">
+                    <option value="">Child...</option>
+                    ${state.children.map(c => `<option value="${c.id}" ${tu.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+                  </select>
+                  <input type="number" value="${tu.pct}" min="0" max="100" step="1"
+                    onchange="actions.updateTopup(${pi},${ti},'pct',Number(this.value))"
+                    class="w-14 px-1 py-0.5 border border-slate-300 rounded bg-white text-xs" />
+                  <span class="text-slate-400">% for</span>
+                  <input type="number" value="${tu.months}" min="1" max="36" step="1"
+                    onchange="actions.updateTopup(${pi},${ti},'months',Number(this.value))"
+                    class="w-12 px-1 py-0.5 border border-slate-300 rounded bg-white text-xs" />
+                  <span class="text-slate-400">mo</span>
+                  <button onclick="actions.removeTopup(${pi},${ti})" class="text-red-400 hover:text-red-600 font-bold">&times;</button>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderChildSetup() {
+  if (!state.children.length) return '';
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <h2 class="text-lg font-semibold text-slate-900 mb-1">Day Pool &amp; Previously Used</h2>
+      <p class="text-xs text-slate-400 mb-4">${FK.SJUK_DAYS_TOTAL} sjukpenning + ${FK.LAGSTA_DAYS_TOTAL} lägsta days per child, shared between parents. ${FK.RESERVED_SJUK} sjukpenning days reserved per parent.</p>
+      <div class="space-y-4">
+        ${state.children.map(c => {
+          return `
+            <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <div class="font-medium text-sm mb-2">${esc(c.name)}</div>
+              <div class="text-xs font-medium text-slate-600 mb-1.5">Previously used days</div>
+              <div class="grid grid-cols-2 gap-3">
+                ${[0, 1].map(pi => {
+                  const ud = (c.usedDays || [{sjuk:0,lagsta:0},{sjuk:0,lagsta:0}])[pi];
+                  return `
+                  <div class="p-2 rounded space-y-1.5" style="background: ${pi === 0 ? '#eff6ff' : '#fdf2f8'}">
+                    <div class="text-xs font-medium" style="color:${pi === 0 ? '#2563eb' : '#be185d'}">${esc(state.parents[pi].name)}</div>
+                    <div class="flex items-center gap-1">
+                      <label class="text-xs text-slate-500 w-10">Sjuk</label>
+                      <input type="number" value="${ud.sjuk || 0}" min="0" max="${FK.SJUK_DAYS_TOTAL - FK.RESERVED_SJUK}" step="1"
+                        onchange="actions.updateUsedDays('${c.id}',${pi},'sjuk',Number(this.value))"
+                        class="w-full px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white" />
+                    </div>
+                    <div class="flex items-center gap-1">
+                      <label class="text-xs text-slate-500 w-10">Lägsta</label>
+                      <input type="number" value="${ud.lagsta || 0}" min="0" max="${FK.LAGSTA_DAYS_TOTAL}" step="1"
+                        onchange="actions.updateUsedDays('${c.id}',${pi},'lagsta',Number(this.value))"
+                        class="w-full px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white" />
+                    </div>
+                  </div>`;
+                }).join('')}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderRules() {
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-slate-900">Leave Rules</h2>
+        <button onclick="actions.addRule()" class="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-sm rounded-lg font-medium transition" ${state.children.length === 0 ? 'disabled title="Add a child first"' : ''}>+ Add rule</button>
+      </div>
+      <p class="text-xs text-slate-400 mb-3">Define periods of leave: who takes how many days per week, for which child. Sjukpenning days are used first, then lägsta automatically.</p>
+      ${state.rules.length === 0 ? '<p class="text-slate-400 text-sm italic">No leave rules defined yet.</p>' : ''}
+      <div class="space-y-3">
+        ${state.rules.map((r, ri) => `
+          <div class="p-3 rounded-lg border-2" style="background: ${r.pi === 0 ? '#eff6ff' : '#fdf2f8'}; border-color: ${r.pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <select onchange="actions.updateRule(${ri},'pi',Number(this.value))"
+                  class="px-2 py-1 border border-slate-300 rounded text-sm bg-white font-medium">
+                  ${state.parents.map((p, i) => `<option value="${i}" ${r.pi === i ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                </select>
+                <select onchange="actions.updateRule(${ri},'ci',this.value)"
+                  class="px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                  <option value="">Child...</option>
+                  ${state.children.map(c => `<option value="${c.id}" ${r.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+                </select>
+              </div>
+              <button onclick="actions.removeRule(${ri})" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-xs text-slate-500">From</label>
+                <input type="date" value="${r.start || ''}"
+                  onchange="actions.updateRule(${ri},'start',this.value)"
+                  class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">To</label>
+                <input type="date" value="${r.end || ''}"
+                  onchange="actions.updateRule(${ri},'end',this.value)"
+                  class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">Days/week</label>
+                <select onchange="actions.updateRule(${ri},'dpw',Number(this.value))"
+                  class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                  ${[1,2,3,4,5,6,7].map(d => `<option value="${d}" ${r.dpw === d ? 'selected' : ''}>${d}</option>`).join('')}
+                </select>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderResults() {
+  const timeline = calculateTimeline();
+  if (!timeline.months.length) {
+    return '<div class="text-center py-12 text-slate-400">Add children and leave rules to see results.</div>';
+  }
+
+  return `
+    ${renderWarnings(timeline.warnings)}
+    ${renderDayBalance(timeline.consumed)}
+    ${renderTimeline(timeline.months)}
+  `;
+}
+
+function renderWarnings(warnings) {
+  if (!warnings.length) return '';
+  const icons = { error: '!', warn: '!', info: 'i' };
+  const colors = {
+    error: 'bg-red-50 border-red-300 text-red-800',
+    warn: 'bg-amber-50 border-amber-300 text-amber-800',
+    info: 'bg-blue-50 border-blue-300 text-blue-800',
+  };
+  const iconColors = {
+    error: 'bg-red-500',
+    warn: 'bg-amber-500',
+    info: 'bg-blue-500',
+  };
+  return `
+    <div class="mb-6 space-y-2">
+      ${warnings.map(w => `
+        <div class="flex items-start gap-3 p-3 rounded-lg border ${colors[w.type]}">
+          <span class="flex-shrink-0 w-5 h-5 rounded-full ${iconColors[w.type]} text-white text-xs flex items-center justify-center font-bold">${icons[w.type]}</span>
+          <span class="text-sm">${esc(w.msg)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderDayBalance(consumed) {
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
+      <h2 class="text-lg font-semibold text-slate-900 mb-4">Day Balance</h2>
+      <div class="space-y-4">
+        ${state.children.map(c => {
+          const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+          const totalSjuk = cons[0].sjuk + cons[1].sjuk;
+          const totalLagsta = cons[0].lagsta + cons[1].lagsta;
+          const totalUsed = totalSjuk + totalLagsta;
+          const totalPool = FK.SJUK_DAYS_TOTAL + FK.LAGSTA_DAYS_TOTAL;
+          const sjukPct = Math.min(100, totalSjuk / FK.SJUK_DAYS_TOTAL * 100);
+          const lagstaPct = Math.min(100, totalLagsta / FK.LAGSTA_DAYS_TOTAL * 100);
+
+          const transferSjuk = Math.round(cons[0].sjuk) - Math.round(cons[1].sjuk);
+          const transferLagsta = Math.round(cons[0].lagsta) - Math.round(cons[1].lagsta);
+          let transferNote = '';
+          if (totalSjuk > 0 || totalLagsta > 0) {
+            const parts = [];
+            if (Math.abs(transferSjuk) > 1) {
+              const from = transferSjuk > 0 ? 1 : 0;
+              const to = 1 - from;
+              parts.push(Math.abs(transferSjuk) + ' sjuk days ' + esc(state.parents[from].name) + ' → ' + esc(state.parents[to].name));
+            }
+            if (Math.abs(transferLagsta) > 1) {
+              const from = transferLagsta > 0 ? 1 : 0;
+              const to = 1 - from;
+              parts.push(Math.abs(transferLagsta) + ' lägsta days ' + esc(state.parents[from].name) + ' → ' + esc(state.parents[to].name));
+            }
+            if (parts.length) transferNote = 'Implied transfer: ' + parts.join(', ');
+          }
+
+          return `
+            <div class="p-4 bg-amber-50 rounded-lg border border-amber-200">
+              <div class="font-medium text-sm mb-3">${esc(c.name)}</div>
+              <div class="mb-3">
+                <div class="flex justify-between text-xs text-slate-600 mb-1">
+                  <span>Sjukpenning (${FK.SJUK_DAYS_TOTAL} total, ${FK.RESERVED_SJUK} reserved/parent)</span>
+                  <span>${Math.round(totalSjuk)} / ${FK.SJUK_DAYS_TOTAL} used (${Math.round(FK.SJUK_DAYS_TOTAL - totalSjuk)} left)</span>
+                </div>
+                <div class="h-3 bg-slate-200 rounded-full overflow-hidden flex">
+                  <div class="bar h-full" style="width:${cons[0].sjuk / FK.SJUK_DAYS_TOTAL * 100}%;background:#2563eb" title="${esc(state.parents[0].name)}: ${Math.round(cons[0].sjuk)}"></div>
+                  <div class="bar h-full" style="width:${cons[1].sjuk / FK.SJUK_DAYS_TOTAL * 100}%;background:#be185d" title="${esc(state.parents[1].name)}: ${Math.round(cons[1].sjuk)}"></div>
+                </div>
+                <div class="flex justify-between text-xs mt-0.5">
+                  <span style="color:#2563eb">${esc(state.parents[0].name)}: ${Math.round(cons[0].sjuk)}</span>
+                  <span style="color:#be185d">${esc(state.parents[1].name)}: ${Math.round(cons[1].sjuk)}</span>
+                </div>
+              </div>
+              <div class="mb-2">
+                <div class="flex justify-between text-xs text-slate-600 mb-1">
+                  <span>Lägstanivå (${FK.LAGSTA_DAYS_TOTAL} total, shared)</span>
+                  <span>${Math.round(totalLagsta)} / ${FK.LAGSTA_DAYS_TOTAL} used (${Math.round(FK.LAGSTA_DAYS_TOTAL - totalLagsta)} left)</span>
+                </div>
+                <div class="h-3 bg-slate-200 rounded-full overflow-hidden flex">
+                  <div class="bar h-full" style="width:${cons[0].lagsta / FK.LAGSTA_DAYS_TOTAL * 100}%;background:#60a5fa" title="${esc(state.parents[0].name)}: ${Math.round(cons[0].lagsta)}"></div>
+                  <div class="bar h-full" style="width:${cons[1].lagsta / FK.LAGSTA_DAYS_TOTAL * 100}%;background:#f472b6" title="${esc(state.parents[1].name)}: ${Math.round(cons[1].lagsta)}"></div>
+                </div>
+                <div class="flex justify-between text-xs mt-0.5">
+                  <span style="color:#60a5fa">${esc(state.parents[0].name)}: ${Math.round(cons[0].lagsta)}</span>
+                  <span style="color:#f472b6">${esc(state.parents[1].name)}: ${Math.round(cons[1].lagsta)}</span>
+                </div>
+              </div>
+              <div class="text-xs text-slate-500 text-center">
+                Total: ${Math.round(totalUsed)} / ${totalPool} days used
+              </div>
+              ${transferNote ? '<div class="mt-1.5 text-xs text-slate-500 text-center italic">' + transferNote + '</div>' : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderTimeline(months) {
+  const p0Name = state.parents[0].name;
+  const p1Name = state.parents[1].name;
+  const fullSalary = state.parents[0].salary + state.parents[1].salary;
+  const barBase = Math.max(fullSalary, ...months.map(m => m.parents[0].totalIncome + m.parents[1].totalIncome), 1);
+
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
+      <h2 class="text-lg font-semibold text-slate-900 mb-4">Monthly Overview</h2>
+      <div class="space-y-0.5">
+        ${months.map((m, mi) => {
+          const p0 = m.parents[0], p1 = m.parents[1];
+          const familyTotal = p0.totalIncome + p1.totalIncome;
+          const isActive = p0.leaveDays > 0 || p1.leaveDays > 0;
+          const pct = fullSalary > 0 ? Math.round(familyTotal / fullSalary * 100) : 100;
+          const pctColor = pct >= 95 ? 'text-slate-400' : pct >= 75 ? 'text-amber-600' : 'text-red-600';
+
+          function parentDetail(p, name, color) {
+            if (p.leaveDays <= 0) return '<span class="text-xs text-slate-400">' + esc(name) + ': working (' + formatKr(p.totalIncome) + ')</span>';
+            const parts = [];
+            parts.push(Math.round(p.leaveDays) + ' days leave');
+            parts.push('FK ' + formatKr(p.leaveIncome));
+            if (p.workIncome > 0) parts.push('Work ' + formatKr(p.workIncome));
+            if (p.topupIncome > 0) parts.push('Top-up ' + formatKr(p.topupIncome));
+            return '<span class="text-xs" style="color:' + color + '">' + esc(name) + '</span><span class="text-xs text-slate-600">: ' + parts.join(' · ') + ' = <strong>' + formatKr(p.totalIncome) + '</strong></span>';
+          }
+
+          return `
+            <div class="rounded-lg ${isActive ? 'hover:bg-slate-50' : ''} ${isActive ? 'cursor-pointer' : ''}" ${isActive ? 'onclick="actions.toggleMonth(' + mi + ')"' : ''}>
+              <div class="flex items-center gap-2 py-1.5 px-2">
+                <span class="text-sm font-medium text-slate-700 flex-shrink-0" style="width:5.5rem">${m.year} ${monthName(m.month).slice(0,3)}</span>
+                <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
+                  ${isActive ? `
+                    <div class="bar h-full" style="width:${p0.totalIncome / barBase * 100}%;background:#2563eb"></div>
+                    <div class="bar h-full" style="width:${p1.totalIncome / barBase * 100}%;background:#be185d"></div>
+                  ` : `
+                    <div class="bar h-full" style="width:${p0.totalIncome / barBase * 100}%;background:#93c5fd"></div>
+                    <div class="bar h-full" style="width:${p1.totalIncome / barBase * 100}%;background:#f9a8d4"></div>
+                  `}
+                </div>
+                <span class="w-20 text-sm font-bold text-right flex-shrink-0">${formatKr(familyTotal)}</span>
+                <span class="w-10 text-xs ${pctColor} text-right flex-shrink-0">${pct}%</span>
+                ${isActive ? '<span class="w-4 text-xs text-slate-300 flex-shrink-0 tl-arrow" data-mi="' + mi + '">&#9654;</span>' : '<span class="w-4"></span>'}
+              </div>
+              ${isActive ? `<div class="tl-detail hidden px-2 pb-2 pt-0.5" style="margin-left:5.5rem" data-detail="${mi}">
+                <div class="flex flex-col gap-0.5 pl-2 border-l-2 border-slate-200">
+                  <div>${parentDetail(p0, p0Name, '#2563eb')}</div>
+                  <div>${parentDetail(p1, p1Name, '#be185d')}</div>
+                </div>
+              </div>` : ''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// --- ACTIONS ---
+
+window.actions = {
+  addChild() {
+    const id = nextId();
+    state.children.push({ id, name: 'Child ' + (state.children.length + 1), birthDate: '', usedDays: [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }] });
+    saveState();
+    renderAll();
+  },
+  removeChild(id) {
+    state.children = state.children.filter(c => c.id !== id);
+    state.rules = state.rules.filter(r => r.ci !== id);
+    for (const p of state.parents) {
+      p.topups = p.topups.filter(t => t.ci !== id);
+    }
+    saveState();
+    renderAll();
+  },
+  updateChild(id, field, value) {
+    const c = state.children.find(c => c.id === id);
+    if (c) c[field] = value;
+    saveState();
+    renderAll();
+  },
+  updateParent(pi, field, value) {
+    state.parents[pi][field] = value;
+    saveState();
+    renderAll();
+  },
+  addTopup(pi) {
+    state.parents[pi].topups.push({ ci: '', pct: 10, months: 6 });
+    saveState();
+    renderAll();
+  },
+  removeTopup(pi, ti) {
+    state.parents[pi].topups.splice(ti, 1);
+    saveState();
+    renderAll();
+  },
+  updateTopup(pi, ti, field, value) {
+    state.parents[pi].topups[ti][field] = value;
+    saveState();
+    renderAll();
+  },
+  updateUsedDays(childId, pi, level, value) {
+    const c = state.children.find(c => c.id === childId);
+    if (!c) return;
+    if (!c.usedDays) c.usedDays = [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    c.usedDays[pi][level] = Math.max(0, Math.round(value));
+    saveState();
+    renderAll();
+  },
+  addRule() {
+    const firstChild = state.children[0];
+    let defaultStart = '';
+    let defaultEnd = '';
+    if (firstChild && firstChild.birthDate) {
+      defaultStart = firstChild.birthDate;
+      const end = addMonths(firstChild.birthDate, 6);
+      if (end) defaultEnd = end.toISOString().slice(0, 10);
+    }
+    state.rules.push({
+      id: nextId(),
+      pi: 0,
+      ci: firstChild ? firstChild.id : '',
+      start: defaultStart,
+      end: defaultEnd,
+      dpw: 7,
+    });
+    saveState();
+    renderAll();
+  },
+  removeRule(ri) {
+    state.rules.splice(ri, 1);
+    saveState();
+    renderAll();
+  },
+  updateRule(ri, field, value) {
+    state.rules[ri][field] = value;
+    saveState();
+    renderAll();
+  },
+  toggleMonth(mi) {
+    const detail = document.querySelector('[data-detail="' + mi + '"]');
+    const arrow = document.querySelector('.tl-arrow[data-mi="' + mi + '"]');
+    if (detail) detail.classList.toggle('hidden');
+    if (arrow) arrow.classList.toggle('open');
+  },
+};
+
+function renderAll() {
+  state.rules.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+  document.getElementById('config-section').innerHTML = renderConfig();
+  document.getElementById('results-section').innerHTML = renderResults();
+}
+
+// --- INIT ---
+loadState();
+renderAll();
+</script>
+</body>
+</html>
