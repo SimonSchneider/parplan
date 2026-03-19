@@ -1051,10 +1051,10 @@ function renderRemainingDays(consumed) {
     const saveableAfter4 = Math.min(remTotal, FK.SAVE_LIMIT_4YR);
 
     if (mustBefore4 > 0) {
-      pools.push({ child: c.name, days: mustBefore4, deadline: age4, label: 'before age 4' });
+      pools.push({ child: c.name, days: mustBefore4, deadline: age4, label: 'before age 4', windowStart: null });
     }
     if (saveableAfter4 > 0) {
-      pools.push({ child: c.name, days: saveableAfter4, deadline: age12, label: 'before age 12' });
+      pools.push({ child: c.name, days: saveableAfter4, deadline: age12, label: 'before age 12', windowStart: age4 });
     }
   }
 
@@ -1076,12 +1076,28 @@ function renderRemainingDays(consumed) {
   const firstYear = Math.min(planStart.getFullYear(), ...plannedYears, latestDeadline.getFullYear());
   const lastYear = Math.max(latestDeadline.getFullYear(), ...plannedYears, planStart.getFullYear());
 
-  const yearSlots = [];
+  const dayMs = 86400000;
+  function daysInSegment(segStart, segEnd) {
+    return Math.max(0, Math.round((segEnd - segStart) / dayMs) + 1);
+  }
+  function roundPreservingSum(amounts) {
+    const target = Math.round(amounts.reduce((a, b) => a + b, 0));
+    const fl = amounts.map(a => Math.floor(a));
+    let sum = fl.reduce((a, b) => a + b, 0);
+    let remainder = target - sum;
+    const indices = amounts.map((_, i) => i).sort((a, b) => (amounts[b] - fl[b]) - (amounts[a] - fl[a]));
+    for (let i = 0; i < remainder; i++) fl[indices[i]] += 1;
+    return fl;
+  }
+
+  const monthSlots = [];
   for (let y = firstYear; y <= lastYear; y++) {
-    const yStart = y === firstYear ? planStart : new Date(y, 0, 1);
-    const yEnd = new Date(y + 1, 0, 1);
-    const fracOfYear = Math.min(1, (yEnd - yStart) / (365.25 * 86400000));
-    yearSlots.push({ year: y, sjuk: 0, lagsta: 0, total: 0, sources: [], fracOfYear, fixed: false });
+    const startMonth = (y === firstYear) ? planStart.getMonth() : 0;
+    for (let m = startMonth; m <= 11; m++) {
+      const monthStart = new Date(y, m, 1);
+      const monthEnd = new Date(y, m + 1, 0);
+      monthSlots.push({ year: y, month: m, monthStart, monthEnd, days: 0, sources: [], fixed: false });
+    }
   }
 
   const plansByYear = {};
@@ -1095,15 +1111,20 @@ function renderRemainingDays(consumed) {
     allPlannedTotal += yp.days;
   }
 
-  for (const slot of yearSlots) {
+  for (let i = 0; i < monthSlots.length; i++) {
+    const slot = monthSlots[i];
+    const isFirstMonthOfYear = (i === 0) || (monthSlots[i - 1].year !== slot.year);
+    if (!isFirstMonthOfYear) continue;
     const plans = plansByYear[slot.year];
     if (plans) {
       for (const p of plans) {
-        slot.total += p.days;
+        slot.days += p.days;
         slot.sources.push({ child: p.child, days: p.days, label: 'planned' });
       }
-      slot.fixed = true;
     }
+  }
+  for (const slot of monthSlots) {
+    if (plansByYear[slot.year]) slot.fixed = true;
   }
 
   let plannedLeft = allPlannedTotal;
@@ -1114,56 +1135,97 @@ function renderRemainingDays(consumed) {
     plannedLeft -= deduct;
   }
 
+  const latestBefore4Deadline = pools
+    .filter(p => p.label === 'before age 4')
+    .reduce((max, p) => (p.deadline > max ? p.deadline : max), new Date(0));
+
   for (const pool of pools) {
-    let remaining = pool.days;
-    const eligible = yearSlots.filter(s => {
-      if (s.fixed) return false;
-      const yEnd = new Date(s.year + 1, 0, 1);
-      return yEnd > planStart && new Date(s.year, 0, 1) < pool.deadline;
-    });
+    const poolStart = pool.windowStart != null ? pool.windowStart : planStart;
+    const poolEnd = pool.deadline;
+    const eligible = monthSlots.filter(slot => {
+      if (slot.fixed) return false;
+      if (pool.label === 'before age 12' && slot.monthStart <= latestBefore4Deadline) return false;
+      const segStart = slot.monthStart > poolStart ? slot.monthStart : poolStart;
+      const segEnd = slot.monthEnd < poolEnd ? slot.monthEnd : poolEnd;
+      return segEnd >= segStart;
+    }).map(slot => {
+      const segStart = slot.monthStart > poolStart ? slot.monthStart : poolStart;
+      const segEnd = slot.monthEnd < poolEnd ? slot.monthEnd : poolEnd;
+      const segmentDays = daysInSegment(segStart, segEnd);
+      return { slot, segmentDays };
+    }).filter(x => x.segmentDays > 0);
+
     if (!eligible.length) continue;
+    const totalWeight = eligible.reduce((s, x) => s + x.segmentDays, 0);
+    if (totalWeight <= 0) continue;
 
-    while (remaining > 0) {
-      let minDensity = Infinity;
-      for (const s of eligible) {
-        const d = s.fracOfYear > 0 ? s.total / s.fracOfYear : Infinity;
-        if (d < minDensity) minDensity = d;
+    const fullYears = [];
+    for (let y = firstYear; y <= lastYear; y++) {
+      const yStart = new Date(y, 0, 1);
+      const yEnd = new Date(y, 11, 31);
+      if (poolStart <= yStart && poolEnd >= yEnd) fullYears.push(y);
+    }
+    const fullSlots = eligible.filter(x => fullYears.includes(x.slot.year));
+    const partialSlots = eligible.filter(x => !fullYears.includes(x.slot.year));
+    const fullWeight = fullSlots.reduce((s, x) => s + x.segmentDays, 0);
+    const partialWeight = partialSlots.reduce((s, x) => s + x.segmentDays, 0);
+
+    let fullYearTotal = 0;
+    let partialTotal = pool.days;
+    if (fullYears.length > 0 && totalWeight > 0) {
+      fullYearTotal = Math.round(pool.days * fullWeight / totalWeight);
+      partialTotal = pool.days - fullYearTotal;
+    }
+
+    if (fullYears.length > 0 && fullYearTotal > 0) {
+      const currentTotalsByYear = {};
+      for (const slot of monthSlots) {
+        currentTotalsByYear[slot.year] = (currentTotalsByYear[slot.year] || 0) + slot.days;
       }
-      const atMin = eligible.filter(s => {
-        const d = s.fracOfYear > 0 ? s.total / s.fracOfYear : Infinity;
-        return Math.abs(d - minDensity) < 0.5;
-      });
-
-      let nextDensity = Infinity;
-      for (const s of eligible) {
-        const d = s.fracOfYear > 0 ? s.total / s.fracOfYear : Infinity;
-        if (d > minDensity + 0.5 && d < nextDensity) nextDensity = d;
-      }
-
-      const totalMinFrac = atMin.reduce((s, sl) => s + sl.fracOfYear, 0);
-      const gapPerFrac = nextDensity === Infinity ? remaining / totalMinFrac : (nextDensity - minDensity);
-      const canFill = Math.min(remaining, Math.round(gapPerFrac * totalMinFrac));
-      if (canFill <= 0) {
-        atMin[0].total += remaining;
-        atMin[0].sources.push({ child: pool.child, days: remaining, label: pool.label });
-        remaining = 0;
-        break;
-      }
-
-      let assigned = 0;
-      for (const slot of atMin) {
-        if (remaining - assigned <= 0) break;
-        const share = Math.round(canFill * slot.fracOfYear / totalMinFrac);
-        const give = Math.min(share, remaining - assigned);
-        if (give > 0) {
-          slot.total += give;
-          slot.sources.push({ child: pool.child, days: give, label: pool.label });
-          assigned += give;
+      const sumCurrent = fullYears.reduce((s, y) => s + (currentTotalsByYear[y] || 0), 0);
+      const targetPerYear = (fullYearTotal + sumCurrent) / fullYears.length;
+      let perYearAmounts = fullYears.map(y => Math.max(0, targetPerYear - (currentTotalsByYear[y] || 0)));
+      const sumTarget = perYearAmounts.reduce((a, b) => a + b, 0);
+      if (sumTarget <= 0) perYearAmounts = fullYears.map(() => fullYearTotal / fullYears.length);
+      else if (Math.abs(sumTarget - fullYearTotal) > 0.5) perYearAmounts = perYearAmounts.map(a => a * fullYearTotal / sumTarget);
+      const perYearRounded = roundPreservingSum(perYearAmounts);
+      for (let i = 0; i < fullYears.length; i++) {
+        const y = fullYears[i];
+        const yearTotal = Math.max(0, Math.min(perYearRounded[i], fullYearTotal));
+        const monthsInYear = fullSlots.filter(x => x.slot.year === y);
+        if (monthsInYear.length === 0) continue;
+        const perMonth = monthsInYear.map(() => yearTotal / monthsInYear.length);
+        const perMonthRounded = roundPreservingSum(perMonth);
+        for (let j = 0; j < monthsInYear.length; j++) {
+          const give = perMonthRounded[j];
+          if (give > 0) {
+            monthsInYear[j].slot.days += give;
+            monthsInYear[j].slot.sources.push({ child: pool.child, days: give, label: pool.label });
+          }
         }
       }
-      remaining -= assigned;
-      if (assigned === 0) break;
     }
+
+    if (partialSlots.length > 0 && partialTotal > 0 && partialWeight > 0) {
+      const amounts = partialSlots.map(x => partialTotal * x.segmentDays / partialWeight);
+      const rounded = roundPreservingSum(amounts);
+      for (let i = 0; i < partialSlots.length; i++) {
+        const give = rounded[i];
+        if (give > 0) {
+          partialSlots[i].slot.days += give;
+          partialSlots[i].slot.sources.push({ child: pool.child, days: give, label: pool.label });
+        }
+      }
+    }
+  }
+
+  const yearSlots = [];
+  for (let y = firstYear; y <= lastYear; y++) {
+    const monthsInYear = monthSlots.filter(s => s.year === y);
+    const total = monthsInYear.reduce((s, m) => s + m.days, 0);
+    const sources = monthsInYear.flatMap(m => m.sources);
+    const fixed = monthsInYear.some(m => m.fixed);
+    yearSlots.push({ year: y, sjuk: 0, lagsta: 0, total, sources, fixed });
   }
 
   let globalSjukLeft = totalRemSjuk;
@@ -1180,7 +1242,7 @@ function renderRemainingDays(consumed) {
   return `
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
       <h2 class="text-lg font-semibold text-slate-900 mb-1">Remaining Days</h2>
-      <p class="text-xs text-slate-400 mb-4">Joint pool across all children. Days balanced evenly per year, respecting age 4 and age 12 deadlines.</p>
+      <p class="text-xs text-slate-400 mb-4">Joint pool across all children. Days balanced evenly over time (by month), respecting age 4 and age 12 deadlines. Results shown by year.</p>
 
       <div class="flex flex-wrap gap-3 mb-4">
         <div class="flex-1 min-w-[100px] p-3 bg-blue-50 rounded-lg text-center">
