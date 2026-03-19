@@ -18,13 +18,16 @@
     .tooltip:hover .tip { display: block; }
     .tl-arrow { transition: transform 0.15s; display: inline-block; }
     .tl-arrow.open { transform: rotate(90deg); }
+    .collapsible-section summary::-webkit-details-marker { display: none; }
+    .collapsible-section .collapsible-chevron { transition: transform 0.2s; }
+    .collapsible-section[open] .collapsible-chevron { transform: rotate(180deg); }
     @media (max-width: 768px) { .desktop-only { display: none; } }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen">
 
-<div class="max-w-7xl mx-auto px-4 py-6">
-  <header class="mb-8">
+<div class="max-w-[1920px] mx-auto px-4 py-6">
+  <header class="mb-6">
     <div class="flex items-center gap-3 mb-2">
       <div class="w-10 h-7 rounded overflow-hidden flex flex-col">
         <div class="flex-1 bg-blue-600"></div>
@@ -36,8 +39,10 @@
     <p class="text-slate-500 text-sm">Plan parental leave for two parents. Rules based on Försäkringskassan 2026.</p>
   </header>
 
-  <div id="config-section"></div>
-  <div id="results-section"></div>
+  <div class="flex flex-col lg:flex-row gap-6 min-h-[calc(100vh-120px)]">
+    <div id="left-pane" class="flex-1 lg:flex-[0_0_48%] space-y-4 overflow-y-auto lg:max-h-[calc(100vh-120px)]"></div>
+    <div id="right-pane" class="flex-1 lg:flex-[0_0_48%] space-y-4 overflow-y-auto lg:max-h-[calc(100vh-120px)]"></div>
+  </div>
 </div>
 
 <script>
@@ -513,19 +518,140 @@ function generateWarnings(consumed, monthResults) {
 
 // --- RENDERING ---
 
-function renderConfig() {
+const COLLAPSED_STORAGE_KEY = 'parplan_collapsedSections';
+
+const collapsedSections = (function () {
+  const set = new Set();
+  try {
+    const raw = localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) arr.forEach(id => set.add(id));
+    }
+  } catch (_) {}
+  return set;
+})();
+
+function saveCollapsedState() {
+  try {
+    localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsedSections]));
+  } catch (_) {}
+}
+
+function collapsible(id, title, summary, content) {
+  const isOpen = !collapsedSections.has(id);
   return `
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-      <div class="space-y-6">
-        ${renderChildren()}
-        ${renderParents()}
-      </div>
-      <div class="space-y-6">
-        ${renderChildSetup()}
-        ${renderRules()}
-      </div>
-    </div>
+    <details class="collapsible-section bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden" data-collapsible-id="${esc(id)}" ${isOpen ? 'open' : ''}>
+      <summary class="flex items-center justify-between gap-2 px-4 py-3 cursor-pointer list-none select-none hover:bg-slate-50 border-b border-slate-100">
+        <span class="font-semibold text-slate-900">${esc(title)}</span>
+        <span class="text-sm text-slate-500 truncate flex-1 text-right mx-2">${esc(summary)}</span>
+        <span class="collapsible-chevron text-slate-400 text-xs flex-shrink-0">&#9660;</span>
+      </summary>
+      <div class="p-4 pt-3 border-t-0">${content}</div>
+    </details>
   `;
+}
+
+document.addEventListener('toggle', function (e) {
+  if (e.target.classList && e.target.classList.contains('collapsible-section')) {
+    const id = e.target.getAttribute('data-collapsible-id');
+    if (id) {
+      if (e.target.open) collapsedSections.delete(id);
+      else collapsedSections.add(id);
+      saveCollapsedState();
+    }
+  }
+}, true);
+
+function summaryChildren() {
+  if (!state.children.length) return 'No children';
+  return state.children.map(c => {
+    const d = c.birthDate ? c.birthDate.slice(0, 7) : '?';
+    return `${esc(c.name)} (${d})`;
+  }).join(', ');
+}
+
+function summaryParents() {
+  return state.parents.map(p => `${esc(p.name)}: ${(p.salary / 1000).toFixed(0)}k`).join(', ');
+}
+
+function summaryDayPool() {
+  if (!state.children.length) return 'No children';
+  return state.children.map(c => {
+    const u = c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const total = (u[0].sjuk || 0) + (u[0].lagsta || 0) + (u[1].sjuk || 0) + (u[1].lagsta || 0);
+    return `${esc(c.name)}: ${total} used`;
+  }).join(', ');
+}
+
+function summaryRules() {
+  if (!state.rules.length) return 'No rules';
+  const starts = state.rules.map(r => r.start).filter(Boolean).sort();
+  const ends = state.rules.map(r => r.end).filter(Boolean).sort((a, b) => b.localeCompare(a));
+  const range = starts.length && ends.length ? `${starts[0].slice(0, 7)} – ${ends[0].slice(0, 7)}` : '';
+  return `${state.rules.length} rules${range ? ', ' + range : ''}`;
+}
+
+function summaryYearlyPlans() {
+  if (!state.yearlyPlans || !state.yearlyPlans.length) return 'None';
+  return `${state.yearlyPlans.length} plan(s)`;
+}
+
+function summaryWarnings(warnings) {
+  if (!warnings || !warnings.length) return '0 warnings';
+  const counts = { error: 0, warn: 0, info: 0 };
+  warnings.forEach(w => { counts[w.type] = (counts[w.type] || 0) + 1; });
+  const parts = [];
+  if (counts.error) parts.push(`${counts.error} error(s)`);
+  if (counts.warn) parts.push(`${counts.warn} warning(s)`);
+  if (counts.info) parts.push(`${counts.info} info`);
+  return parts.join(', ');
+}
+
+function summaryDayBalance(consumed) {
+  if (!state.children.length) return '—';
+  let totalUsed = 0, totalPool = 0;
+  for (const c of state.children) {
+    const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const used = cons[0].sjuk + cons[0].lagsta + cons[1].sjuk + cons[1].lagsta;
+    totalUsed += used;
+    totalPool += FK.SJUK_DAYS_TOTAL + FK.LAGSTA_DAYS_TOTAL;
+  }
+  return `${Math.round(totalUsed)}/${totalPool} used`;
+}
+
+function summaryRemainingDays(consumed) {
+  const children = state.children.filter(c => c.birthDate);
+  if (!children.length) return '—';
+  let totalRem = 0;
+  for (const c of children) {
+    const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const sjukUsed = cons[0].sjuk + cons[1].sjuk;
+    const lagstaUsed = cons[0].lagsta + cons[1].lagsta;
+    totalRem += Math.max(0, FK.SJUK_DAYS_TOTAL - sjukUsed) + Math.max(0, FK.LAGSTA_DAYS_TOTAL - lagstaUsed);
+  }
+  if (totalRem <= 0) return '0 days';
+  const years = (totalRem / 480).toFixed(1);
+  return `${Math.round(totalRem)} days, ${years} years`;
+}
+
+function summaryMonthlyOverview(months) {
+  if (!months || !months.length) return '—';
+  const first = months[0], last = months[months.length - 1];
+  const a = first ? `${monthName(first.month)} ${first.year}` : '';
+  const b = last ? `${monthName(last.month)} ${last.year}` : '';
+  return `${months.length} months${a && b ? ', ' + a + ' – ' + b : ''}`;
+}
+
+function renderConfig() {
+  const dayPool = renderChildSetup();
+  return [
+    collapsible('children', 'Children', summaryChildren(), renderChildren()),
+    collapsible('parents', 'Parents', summaryParents(), renderParents()),
+    collapsible('day-pool', 'Day Pool / Used', summaryDayPool(), dayPool || '<p class="text-slate-400 text-sm">Add children to set used days.</p>'),
+    collapsible('rules', 'Leave Rules', summaryRules(), renderRules()),
+    collapsible('yearly-plans', 'Planned Yearly Leave', summaryYearlyPlans(), renderYearlyPlans()),
+  ].join('');
 }
 
 function renderChildren() {
@@ -754,18 +880,46 @@ function renderRules() {
   `;
 }
 
-function renderResults() {
-  const timeline = calculateTimeline();
-  if (!timeline.months.length) {
-    return '<div class="text-center py-12 text-slate-400">Add children and leave rules to see results.</div>';
-  }
-
+function renderYearlyPlans() {
   return `
-    ${renderWarnings(timeline.warnings)}
-    ${renderDayBalance(timeline.consumed)}
-    ${renderRemainingDays(timeline.consumed)}
-    ${renderTimeline(timeline.months)}
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-sm font-semibold text-slate-700">Planned yearly leave</h3>
+      <button onclick="actions.addYearlyPlan()" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Add</button>
+    </div>
+    ${(!state.yearlyPlans || state.yearlyPlans.length === 0) ? '<p class="text-xs text-slate-400 italic mb-1">No fixed plans. Days will be distributed evenly.</p>' : ''}
+    ${(state.yearlyPlans || []).map((yp, yi) => `
+      <div class="flex items-center gap-2 mb-1.5 text-xs">
+        <select onchange="actions.updateYearlyPlan(${yi},'ci',this.value)"
+          class="px-1.5 py-1 border border-slate-300 rounded bg-white text-xs">
+          ${state.children.map(c => `<option value="${c.id}" ${yp.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        </select>
+        <input type="number" value="${yp.year}" min="2024" max="2050" step="1"
+          onchange="actions.updateYearlyPlan(${yi},'year',this.value)"
+          class="w-16 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
+        <input type="number" value="${yp.days}" min="1" max="200" step="1"
+          onchange="actions.updateYearlyPlan(${yi},'days',this.value)"
+          class="w-14 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
+        <span class="text-slate-400">days</span>
+        <button onclick="actions.removeYearlyPlan(${yi})" class="text-red-400 hover:text-red-600 font-bold">&times;</button>
+      </div>
+    `).join('')}
   `;
+}
+
+function renderResults(timeline) {
+  if (!timeline || !timeline.months.length) {
+    return collapsible('warnings', 'Warnings', '0 warnings', '<div class="text-center py-8 text-slate-400">Add children and leave rules to see results.</div>');
+  }
+  const warningsHtml = renderWarnings(timeline.warnings);
+  const dayBalanceHtml = renderDayBalance(timeline.consumed);
+  const remainingHtml = renderRemainingDays(timeline.consumed);
+  const timelineHtml = renderTimeline(timeline.months);
+  return [
+    collapsible('warnings', 'Warnings', summaryWarnings(timeline.warnings), warningsHtml || '<p class="text-slate-400 text-sm">No warnings.</p>'),
+    collapsible('day-balance', 'Day Balance', summaryDayBalance(timeline.consumed), dayBalanceHtml),
+    collapsible('monthly-overview', 'Monthly Overview', summaryMonthlyOverview(timeline.months), timelineHtml),
+    collapsible('remaining-days', 'Remaining Days', summaryRemainingDays(timeline.consumed), remainingHtml || '<p class="text-slate-400 text-sm">No remaining days to show.</p>'),
+  ].join('');
 }
 
 function renderWarnings(warnings) {
@@ -918,8 +1072,9 @@ function renderRemainingDays(consumed) {
   }
 
   const latestDeadline = pools.length ? pools[pools.length - 1].deadline : planStart;
-  const firstYear = planStart.getFullYear();
-  const lastYear = latestDeadline.getFullYear();
+  const plannedYears = (state.yearlyPlans || []).map(yp => yp.year).filter(y => y && Number.isFinite(y));
+  const firstYear = Math.min(planStart.getFullYear(), ...plannedYears, latestDeadline.getFullYear());
+  const lastYear = Math.max(latestDeadline.getFullYear(), ...plannedYears, planStart.getFullYear());
 
   const yearSlots = [];
   for (let y = firstYear; y <= lastYear; y++) {
@@ -1055,36 +1210,18 @@ function renderRemainingDays(consumed) {
         </div>
       ` : ''}
 
-      <div class="mb-4">
-        <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm font-semibold text-slate-700">Planned yearly leave</h3>
-          <button onclick="actions.addYearlyPlan()" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Add</button>
-        </div>
-        ${state.yearlyPlans.length === 0 ? '<p class="text-xs text-slate-400 italic mb-1">No fixed plans. Days will be distributed evenly.</p>' : ''}
-        ${state.yearlyPlans.map((yp, yi) => `
-          <div class="flex items-center gap-2 mb-1.5 text-xs">
-            <select onchange="actions.updateYearlyPlan(${yi},'ci',this.value)"
-              class="px-1.5 py-1 border border-slate-300 rounded bg-white text-xs">
-              ${state.children.map(c => `<option value="${c.id}" ${yp.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
-            </select>
-            <input type="number" value="${yp.year}" min="2024" max="2050" step="1"
-              onchange="actions.updateYearlyPlan(${yi},'year',this.value)"
-              class="w-16 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
-            <input type="number" value="${yp.days}" min="1" max="200" step="1"
-              onchange="actions.updateYearlyPlan(${yi},'days',this.value)"
-              class="w-14 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
-            <span class="text-slate-400">days</span>
-            <button onclick="actions.removeYearlyPlan(${yi})" class="text-red-400 hover:text-red-600 font-bold">&times;</button>
-          </div>
-        `).join('')}
-      </div>
-
       <h3 class="text-sm font-semibold text-slate-700 mb-2">Suggested yearly plan</h3>
       <div class="space-y-1.5">
         ${yearSlots.filter(s => s.total > 0).map(s => {
           const weeks = (s.total / 5).toFixed(1);
-          const sourceNote = s.sources.length > 0
-            ? s.sources.map(src => esc(src.child) + ' ' + src.label + ': ' + src.days).join(', ')
+          const byChildLabel = {};
+          for (const src of s.sources) {
+            const key = src.child + '|' + src.label;
+            if (!byChildLabel[key]) byChildLabel[key] = { child: src.child, label: src.label, days: 0 };
+            byChildLabel[key].days += src.days;
+          }
+          const sourceNote = Object.keys(byChildLabel).length > 0
+            ? Object.values(byChildLabel).map(o => esc(o.child) + ' ' + o.label + ': ' + Math.round(o.days)).join(', ')
             : '';
           return `
             <div class="rounded-lg hover:bg-slate-50 cursor-pointer ${s.fixed ? 'ring-1 ring-violet-300 bg-violet-50/50' : ''}" onclick="this.querySelector('.yr-detail').classList.toggle('hidden')">
@@ -1409,8 +1546,9 @@ window.actions = {
 function renderAll() {
   state.rules.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
   if (state.yearlyPlans) state.yearlyPlans.sort((a, b) => (a.year || 0) - (b.year || 0));
-  document.getElementById('config-section').innerHTML = renderConfig();
-  document.getElementById('results-section').innerHTML = renderResults();
+  const timeline = calculateTimeline();
+  document.getElementById('left-pane').innerHTML = renderConfig();
+  document.getElementById('right-pane').innerHTML = renderResults(timeline);
 }
 
 // --- INIT ---
