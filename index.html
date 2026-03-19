@@ -880,8 +880,10 @@ function renderTimeline(months) {
       <h2 class="text-lg font-semibold text-slate-900 mb-4">Monthly Overview</h2>
       <div class="flex items-center gap-2 py-1 px-2 mb-1 text-xs text-slate-400">
         <span class="flex-shrink-0" style="width:5.5rem"></span>
-        <span class="flex-1 text-center">${anyNet ? 'Net income bar (scaled to full net salary)' : 'Income bar (scaled to full salary)'}</span>
-        ${anyNet ? '<span class="w-20 text-right flex-shrink-0">Gross</span><span class="w-20 text-right flex-shrink-0 font-medium">Net</span>' : '<span class="w-20 text-right flex-shrink-0">Total</span>'}
+        <span class="flex-1"></span>
+        <span class="w-16 text-right flex-shrink-0" style="color:#2563eb">${esc(p0Name)}</span>
+        <span class="w-16 text-right flex-shrink-0" style="color:#be185d">${esc(p1Name)}</span>
+        <span class="w-16 text-right flex-shrink-0 font-medium">${anyNet ? 'Net' : 'Total'}</span>
         <span class="w-10 text-right flex-shrink-0">%</span>
         <span class="w-4"></span>
       </div>
@@ -899,18 +901,14 @@ function renderTimeline(months) {
 
           function parentDetail(p, name, color) {
             if (p.leaveDays <= 0) {
-              const netNote = p.netIncome !== null ? ' · net ' + formatKr(p.netIncome) : '';
-              return '<span class="text-xs text-slate-400">' + esc(name) + ': working (' + formatKr(p.totalIncome) + netNote + ')</span>';
+              return '<span class="text-xs text-slate-400">' + esc(name) + ': working (gross ' + formatKr(p.totalIncome) + ')</span>';
             }
             const parts = [];
-            parts.push(Math.round(p.leaveDays) + ' days leave');
+            parts.push(Math.round(p.leaveDays) + ' days');
             parts.push('FK ' + formatKr(p.leaveIncome));
             if (p.workIncome > 0) parts.push('Work ' + formatKr(p.workIncome));
             if (p.topupIncome > 0) parts.push('Top-up ' + formatKr(p.topupIncome));
-            let result = '<span class="text-xs" style="color:' + color + '">' + esc(name) + '</span><span class="text-xs text-slate-600">: ' + parts.join(' · ') + ' = <strong>' + formatKr(p.totalIncome) + '</strong>';
-            if (p.netIncome !== null) result += ' · net <strong>' + formatKr(p.netIncome) + '</strong>';
-            result += '</span>';
-            return result;
+            return '<span class="text-xs" style="color:' + color + '">' + esc(name) + '</span><span class="text-xs text-slate-600">: ' + parts.join(' · ') + ' = gross <strong>' + formatKr(p.totalIncome) + '</strong></span>';
           }
 
           return `
@@ -926,8 +924,15 @@ function renderTimeline(months) {
                     <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:#f9a8d4"></div>
                   `}
                 </div>
-                <span class="w-20 text-sm text-right flex-shrink-0 ${hasNet ? 'text-slate-400 text-xs' : 'font-bold'}">${formatKr(familyTotal)}</span>
-                ${hasNet ? `<span class="w-20 text-sm font-bold text-right flex-shrink-0">${formatKr(familyNet)}</span>` : ''}
+                ${hasNet ? `
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#2563eb">${formatKr(p0.netIncome)}</span>
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#be185d">${formatKr(p1.netIncome)}</span>
+                  <span class="w-16 text-sm font-bold text-right flex-shrink-0">${formatKr(familyNet)}</span>
+                ` : `
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#2563eb">${formatKr(p0.totalIncome)}</span>
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#be185d">${formatKr(p1.totalIncome)}</span>
+                  <span class="w-16 text-sm font-bold text-right flex-shrink-0">${formatKr(familyTotal)}</span>
+                `}
                 <span class="w-10 text-xs ${pctColor} text-right flex-shrink-0">${pct}%</span>
                 ${isActive ? '<span class="w-4 text-xs text-slate-300 flex-shrink-0 tl-arrow" data-mi="' + mi + '">&#9654;</span>' : '<span class="w-4"></span>'}
               </div>
