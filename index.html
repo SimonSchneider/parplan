@@ -189,6 +189,7 @@ function defaultState() {
       { name: 'Parent 2', salary: 40000, topups: [], kommun: '', forsamling: '', churchTax: false },
     ],
     rules: [],
+    yearlyPlans: [],
   };
 }
 
@@ -215,9 +216,11 @@ function loadState() {
       }));
       state.children = (state.children || []).map(c => ({
         ...c,
+        preschoolDate: c.preschoolDate || '',
         usedDays: c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }],
       }));
       state.rules = state.rules || [];
+      state.yearlyPlans = state.yearlyPlans || [];
     }
   } catch (e) { console.error('Load failed', e); }
 }
@@ -535,14 +538,22 @@ function renderChildren() {
       ${state.children.length === 0 ? '<p class="text-slate-400 text-sm italic">No children added yet. Add a child to start planning.</p>' : ''}
       <div class="space-y-3">
         ${state.children.map(c => `
-          <div class="flex items-center gap-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
-            <input type="text" value="${esc(c.name)}" placeholder="Name"
-              onchange="actions.updateChild('${c.id}','name',this.value)"
-              class="flex-1 px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
-            <input type="date" value="${c.birthDate || ''}"
-              onchange="actions.updateChild('${c.id}','birthDate',this.value)"
-              class="px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
-            <button onclick="actions.removeChild('${c.id}')" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
+          <div class="p-3 bg-amber-50 rounded-lg border border-amber-200 space-y-2">
+            <div class="flex items-center gap-3">
+              <input type="text" value="${esc(c.name)}" placeholder="Name"
+                onchange="actions.updateChild('${c.id}','name',this.value)"
+                class="flex-1 px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
+              <input type="date" value="${c.birthDate || ''}"
+                onchange="actions.updateChild('${c.id}','birthDate',this.value)"
+                class="px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
+              <button onclick="actions.removeChild('${c.id}')" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-slate-500 w-24">Preschool start</label>
+              <input type="date" value="${c.preschoolDate || ''}"
+                onchange="actions.updateChild('${c.id}','preschoolDate',this.value)"
+                class="px-2 py-1 border border-amber-300 rounded text-xs bg-white" />
+            </div>
           </div>
         `).join('')}
       </div>
@@ -752,6 +763,7 @@ function renderResults() {
   return `
     ${renderWarnings(timeline.warnings)}
     ${renderDayBalance(timeline.consumed)}
+    ${renderRemainingDays(timeline.consumed)}
     ${renderTimeline(timeline.months)}
   `;
 }
@@ -851,6 +863,254 @@ function renderDayBalance(consumed) {
             </div>
           `;
         }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderRemainingDays(consumed) {
+  const children = state.children.filter(c => c.birthDate);
+  if (!children.length) return '';
+
+  const now = new Date();
+  const avgSjukRate = (calcDailyRate(state.parents[0].salary) + calcDailyRate(state.parents[1].salary)) / 2;
+
+  const pools = [];
+  let totalRemSjuk = 0, totalRemLagsta = 0;
+
+  for (const c of children) {
+    const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const sjukUsed = cons[0].sjuk + cons[1].sjuk;
+    const lagstaUsed = cons[0].lagsta + cons[1].lagsta;
+    const remSjuk = Math.max(0, FK.SJUK_DAYS_TOTAL - sjukUsed);
+    const remLagsta = Math.max(0, FK.LAGSTA_DAYS_TOTAL - lagstaUsed);
+    const remTotal = remSjuk + remLagsta;
+    totalRemSjuk += remSjuk;
+    totalRemLagsta += remLagsta;
+    if (remTotal <= 0) continue;
+
+    const bd = parseDate(c.birthDate);
+    const age4 = new Date(bd); age4.setFullYear(age4.getFullYear() + 4);
+    const age12 = new Date(bd); age12.setFullYear(age12.getFullYear() + 12);
+
+    const mustBefore4 = Math.max(0, remTotal - FK.SAVE_LIMIT_4YR);
+    const saveableAfter4 = Math.min(remTotal, FK.SAVE_LIMIT_4YR);
+
+    if (mustBefore4 > 0) {
+      pools.push({ child: c.name, days: mustBefore4, deadline: age4, label: 'before age 4' });
+    }
+    if (saveableAfter4 > 0) {
+      pools.push({ child: c.name, days: saveableAfter4, deadline: age12, label: 'before age 12' });
+    }
+  }
+
+  const totalRem = totalRemSjuk + totalRemLagsta;
+  if (totalRem <= 0) return '';
+
+  pools.sort((a, b) => a.deadline - b.deadline);
+
+  let planStart = now;
+  for (const r of state.rules) {
+    if (r.end) {
+      const d = parseDate(r.end);
+      if (d && d > planStart) planStart = d;
+    }
+  }
+
+  const latestDeadline = pools.length ? pools[pools.length - 1].deadline : planStart;
+  const firstYear = planStart.getFullYear();
+  const lastYear = latestDeadline.getFullYear();
+
+  const yearSlots = [];
+  for (let y = firstYear; y <= lastYear; y++) {
+    const yStart = y === firstYear ? planStart : new Date(y, 0, 1);
+    const yEnd = new Date(y + 1, 0, 1);
+    const fracOfYear = Math.min(1, (yEnd - yStart) / (365.25 * 86400000));
+    yearSlots.push({ year: y, sjuk: 0, lagsta: 0, total: 0, sources: [], fracOfYear, fixed: false });
+  }
+
+  const plansByYear = {};
+  let allPlannedTotal = 0;
+  for (const yp of (state.yearlyPlans || [])) {
+    if (!yp.ci || !yp.days || !yp.year) continue;
+    const child = state.children.find(c => c.id === yp.ci);
+    if (!child) continue;
+    if (!plansByYear[yp.year]) plansByYear[yp.year] = [];
+    plansByYear[yp.year].push({ child: child.name, days: yp.days });
+    allPlannedTotal += yp.days;
+  }
+
+  for (const slot of yearSlots) {
+    const plans = plansByYear[slot.year];
+    if (plans) {
+      for (const p of plans) {
+        slot.total += p.days;
+        slot.sources.push({ child: p.child, days: p.days, label: 'planned' });
+      }
+      slot.fixed = true;
+    }
+  }
+
+  let plannedLeft = allPlannedTotal;
+  for (const pool of pools) {
+    if (plannedLeft <= 0) break;
+    const deduct = Math.min(pool.days, plannedLeft);
+    pool.days -= deduct;
+    plannedLeft -= deduct;
+  }
+
+  for (const pool of pools) {
+    let remaining = pool.days;
+    const eligible = yearSlots.filter(s => {
+      if (s.fixed) return false;
+      const yEnd = new Date(s.year + 1, 0, 1);
+      return yEnd > planStart && new Date(s.year, 0, 1) < pool.deadline;
+    });
+    if (!eligible.length) continue;
+
+    while (remaining > 0) {
+      let minDensity = Infinity;
+      for (const s of eligible) {
+        const d = s.fracOfYear > 0 ? s.total / s.fracOfYear : Infinity;
+        if (d < minDensity) minDensity = d;
+      }
+      const atMin = eligible.filter(s => {
+        const d = s.fracOfYear > 0 ? s.total / s.fracOfYear : Infinity;
+        return Math.abs(d - minDensity) < 0.5;
+      });
+
+      let nextDensity = Infinity;
+      for (const s of eligible) {
+        const d = s.fracOfYear > 0 ? s.total / s.fracOfYear : Infinity;
+        if (d > minDensity + 0.5 && d < nextDensity) nextDensity = d;
+      }
+
+      const totalMinFrac = atMin.reduce((s, sl) => s + sl.fracOfYear, 0);
+      const gapPerFrac = nextDensity === Infinity ? remaining / totalMinFrac : (nextDensity - minDensity);
+      const canFill = Math.min(remaining, Math.round(gapPerFrac * totalMinFrac));
+      if (canFill <= 0) {
+        atMin[0].total += remaining;
+        atMin[0].sources.push({ child: pool.child, days: remaining, label: pool.label });
+        remaining = 0;
+        break;
+      }
+
+      let assigned = 0;
+      for (const slot of atMin) {
+        if (remaining - assigned <= 0) break;
+        const share = Math.round(canFill * slot.fracOfYear / totalMinFrac);
+        const give = Math.min(share, remaining - assigned);
+        if (give > 0) {
+          slot.total += give;
+          slot.sources.push({ child: pool.child, days: give, label: pool.label });
+          assigned += give;
+        }
+      }
+      remaining -= assigned;
+      if (assigned === 0) break;
+    }
+  }
+
+  let globalSjukLeft = totalRemSjuk;
+  for (const slot of yearSlots) {
+    const sjukForSlot = Math.min(globalSjukLeft, slot.total);
+    slot.sjuk = sjukForSlot;
+    slot.lagsta = slot.total - sjukForSlot;
+    globalSjukLeft -= sjukForSlot;
+  }
+
+  const totalValue = Math.round(totalRemSjuk * avgSjukRate + totalRemLagsta * FK.LAGSTA_DAILY);
+  const maxDays = Math.max(...yearSlots.map(s => s.total), 1);
+
+  return `
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
+      <h2 class="text-lg font-semibold text-slate-900 mb-1">Remaining Days</h2>
+      <p class="text-xs text-slate-400 mb-4">Joint pool across all children. Days balanced evenly per year, respecting age 4 and age 12 deadlines.</p>
+
+      <div class="flex flex-wrap gap-3 mb-4">
+        <div class="flex-1 min-w-[100px] p-3 bg-blue-50 rounded-lg text-center">
+          <div class="text-2xl font-bold text-blue-700">${Math.round(totalRem)}</div>
+          <div class="text-xs text-slate-500">total days</div>
+        </div>
+        <div class="flex-1 min-w-[100px] p-3 bg-blue-50 rounded-lg text-center">
+          <div class="text-lg font-bold text-blue-600">${Math.round(totalRemSjuk)}</div>
+          <div class="text-xs text-slate-500">sjukpenning</div>
+        </div>
+        <div class="flex-1 min-w-[100px] p-3 bg-orange-50 rounded-lg text-center">
+          <div class="text-lg font-bold text-orange-600">${Math.round(totalRemLagsta)}</div>
+          <div class="text-xs text-slate-500">lägstanivå</div>
+        </div>
+        <div class="flex-1 min-w-[100px] p-3 bg-emerald-50 rounded-lg text-center">
+          <div class="text-lg font-bold text-emerald-700">${formatKr(totalValue)}</div>
+          <div class="text-xs text-slate-500">est. value (kr)</div>
+        </div>
+      </div>
+
+      ${pools.some(p => p.label === 'before age 4') ? `
+        <div class="mb-4 p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-xs">
+          <span class="font-medium text-amber-800">Age 4 deadlines: </span>
+          <span class="text-amber-700">${pools.filter(p => p.label === 'before age 4').map(p =>
+            esc(p.child) + ': ' + Math.round(p.days) + ' days by ' + p.deadline.toISOString().slice(0, 10)
+          ).join(' · ')}</span>
+        </div>
+      ` : ''}
+
+      <div class="mb-4">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-semibold text-slate-700">Planned yearly leave</h3>
+          <button onclick="actions.addYearlyPlan()" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Add</button>
+        </div>
+        ${state.yearlyPlans.length === 0 ? '<p class="text-xs text-slate-400 italic mb-1">No fixed plans. Days will be distributed evenly.</p>' : ''}
+        ${state.yearlyPlans.map((yp, yi) => `
+          <div class="flex items-center gap-2 mb-1.5 text-xs">
+            <select onchange="actions.updateYearlyPlan(${yi},'ci',this.value)"
+              class="px-1.5 py-1 border border-slate-300 rounded bg-white text-xs">
+              ${state.children.map(c => `<option value="${c.id}" ${yp.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+            </select>
+            <input type="number" value="${yp.year}" min="2024" max="2050" step="1"
+              onchange="actions.updateYearlyPlan(${yi},'year',this.value)"
+              class="w-16 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
+            <input type="number" value="${yp.days}" min="1" max="200" step="1"
+              onchange="actions.updateYearlyPlan(${yi},'days',this.value)"
+              class="w-14 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
+            <span class="text-slate-400">days</span>
+            <button onclick="actions.removeYearlyPlan(${yi})" class="text-red-400 hover:text-red-600 font-bold">&times;</button>
+          </div>
+        `).join('')}
+      </div>
+
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">Suggested yearly plan</h3>
+      <div class="space-y-1.5">
+        ${yearSlots.filter(s => s.total > 0).map(s => {
+          const weeks = (s.total / 5).toFixed(1);
+          const sourceNote = s.sources.length > 0
+            ? s.sources.map(src => esc(src.child) + ' ' + src.label + ': ' + src.days).join(', ')
+            : '';
+          return `
+            <div class="rounded-lg hover:bg-slate-50 cursor-pointer ${s.fixed ? 'ring-1 ring-violet-300 bg-violet-50/50' : ''}" onclick="this.querySelector('.yr-detail').classList.toggle('hidden')">
+              <div class="flex items-center gap-2 py-1.5 px-2">
+                <span class="w-10 text-sm font-medium flex-shrink-0 ${s.fixed ? 'text-violet-700' : 'text-slate-700'}">${s.year}</span>
+                <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
+                  <div class="bar h-full rounded-full" style="width:${s.sjuk / maxDays * 100}%;background:#2563eb"></div>
+                  <div class="bar h-full rounded-full" style="width:${s.lagsta / maxDays * 100}%;background:#f59e0b"></div>
+                </div>
+                <span class="w-20 text-sm font-bold text-right flex-shrink-0">${Math.round(s.total)} days</span>
+                <span class="w-20 text-xs text-slate-500 text-right flex-shrink-0">${weeks} weeks</span>
+                <span class="w-4 text-xs text-slate-300 flex-shrink-0">&#9654;</span>
+              </div>
+              <div class="yr-detail hidden px-2 pb-2 pt-0.5 ml-10">
+                <div class="text-xs text-slate-500 pl-2 border-l-2 border-slate-200 space-y-0.5">
+                  ${s.sjuk > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>' + Math.round(s.sjuk) + ' sjukpenning days (' + formatKr(Math.round(s.sjuk * avgSjukRate)) + ' kr)</div>' : ''}
+                  ${s.lagsta > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>' + Math.round(s.lagsta) + ' lägstanivå days (' + formatKr(Math.round(s.lagsta * FK.LAGSTA_DAILY)) + ' kr)</div>' : ''}
+                  ${sourceNote ? '<div class="text-slate-400 mt-0.5">From: ' + sourceNote + '</div>' : ''}
+                </div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+      <div class="flex items-center gap-4 mt-3 text-xs text-slate-400 justify-center">
+        <span><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>Sjukpenning</span>
+        <span><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>Lägstanivå</span>
       </div>
     </div>
   `;
@@ -1035,7 +1295,7 @@ function esc(s) {
 window.actions = {
   addChild() {
     const id = nextId();
-    state.children.push({ id, name: 'Child ' + (state.children.length + 1), birthDate: '', usedDays: [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }] });
+    state.children.push({ id, name: 'Child ' + (state.children.length + 1), birthDate: '', preschoolDate: '', usedDays: [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }] });
     saveState();
     renderAll();
   },
@@ -1129,10 +1389,26 @@ window.actions = {
     if (detail) detail.classList.toggle('hidden');
     if (arrow) arrow.classList.toggle('open');
   },
+  addYearlyPlan() {
+    state.yearlyPlans.push({ id: nextId(), ci: state.children.length ? state.children[0].id : '', year: new Date().getFullYear() + 1, days: 10 });
+    saveState();
+    renderAll();
+  },
+  removeYearlyPlan(idx) {
+    state.yearlyPlans.splice(idx, 1);
+    saveState();
+    renderAll();
+  },
+  updateYearlyPlan(idx, field, value) {
+    state.yearlyPlans[idx][field] = field === 'days' || field === 'year' ? Number(value) : value;
+    saveState();
+    renderAll();
+  },
 };
 
 function renderAll() {
   state.rules.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+  if (state.yearlyPlans) state.yearlyPlans.sort((a, b) => (a.year || 0) - (b.year || 0));
   document.getElementById('config-section').innerHTML = renderConfig();
   document.getElementById('results-section').innerHTML = renderResults();
 }
