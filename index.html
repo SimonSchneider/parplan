@@ -59,12 +59,134 @@ const FK = {
 let _id = 0;
 function nextId() { return 'id' + (++_id) + '_' + Date.now().toString(36); }
 
+// --- TAX API ---
+
+const SKV_KOMMUN_URL = 'https://skatteverket.entryscape.net/rowstore/dataset/c67b320b-ffee-4876-b073-dd9236cd2a99';
+const SKV_TABELL_URL = 'https://skatteverket.entryscape.net/rowstore/dataset/88320397-5c32-4c16-ae79-d36d95b17b95';
+const TAX_YEAR = '2026';
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const taxCache = { kommuner: null, tabeller: {} };
+
+function cacheGet(key) {
+  try {
+    const raw = localStorage.getItem('skv_' + key);
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_TTL_MS) { localStorage.removeItem('skv_' + key); return null; }
+    return data;
+  } catch { return null; }
+}
+
+function cacheSet(key, data) {
+  try { localStorage.setItem('skv_' + key, JSON.stringify({ ts: Date.now(), data })); } catch {}
+}
+
+async function fetchAllPages(baseUrl, params, maxPerPage = 500) {
+  const all = [];
+  let offset = 0;
+  while (true) {
+    const url = new URL(baseUrl);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    url.searchParams.set('_limit', maxPerPage);
+    url.searchParams.set('_offset', offset);
+    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    const json = await resp.json();
+    all.push(...json.results);
+    if (all.length >= json.resultCount || json.results.length < maxPerPage) break;
+    offset += json.results.length;
+  }
+  return all;
+}
+
+async function loadKommuner() {
+  if (taxCache.kommuner) return taxCache.kommuner;
+  const cached = cacheGet('kommuner_' + TAX_YEAR);
+  if (cached) { taxCache.kommuner = cached; return cached; }
+
+  const rows = await fetchAllPages(SKV_KOMMUN_URL, { 'år': TAX_YEAR });
+  const byKommun = {};
+  for (const r of rows) {
+    const k = r['kommun'];
+    if (!byKommun[k]) byKommun[k] = [];
+    byKommun[k].push({
+      forsamling: r['församling'],
+      inkl: parseFloat(r['summa, inkl. kyrkoavgift']),
+      exkl: parseFloat(r['summa, exkl. kyrkoavgift']),
+    });
+  }
+  taxCache.kommuner = byKommun;
+  cacheSet('kommuner_' + TAX_YEAR, byKommun);
+  return byKommun;
+}
+
+async function loadSkattetabell(tabellNr) {
+  const key = 'tabell_' + TAX_YEAR + '_' + tabellNr;
+  if (taxCache.tabeller[tabellNr]) return taxCache.tabeller[tabellNr];
+  const cached = cacheGet(key);
+  if (cached) { taxCache.tabeller[tabellNr] = cached; return cached; }
+
+  const rows = await fetchAllPages(SKV_TABELL_URL, { 'år': TAX_YEAR, 'tabellnr': String(tabellNr) });
+  const table = rows.map(r => ({
+    from: parseInt(r['inkomst fr.o.m.'], 10),
+    to: parseInt(r['inkomst t.o.m.'], 10),
+    col1: parseInt(r['kolumn 1'], 10) || 0,
+    col5: parseInt(r['kolumn 5'], 10) || 0,
+    col6: parseInt(r['kolumn 6'], 10) || 0,
+  })).sort((a, b) => a.from - b.from);
+  taxCache.tabeller[tabellNr] = table;
+  cacheSet(key, table);
+  return table;
+}
+
+function lookupTax(grossMonthly, table, column = 'col1') {
+  if (!table || !table.length) return null;
+  const amount = Math.round(grossMonthly);
+  if (amount <= 0) return 0;
+  for (const row of table) {
+    if (amount >= row.from && amount <= row.to) return row[column];
+  }
+  return table[table.length - 1][column];
+}
+
+function getTabellNr(kommun, forsamling, churchTax) {
+  if (!taxCache.kommuner || !kommun || !forsamling) return null;
+  const kommunData = taxCache.kommuner[kommun];
+  if (!kommunData) return null;
+  const f = kommunData.find(x => x.forsamling === forsamling);
+  if (!f) return null;
+  const rate = churchTax ? f.inkl : f.exkl;
+  return Math.round(rate);
+}
+
+let kommunerLoaded = false;
+let kommunerLoading = false;
+
+async function ensureKommunerLoaded() {
+  if (kommunerLoaded || kommunerLoading) return;
+  kommunerLoading = true;
+  try {
+    await loadKommuner();
+    kommunerLoaded = true;
+    renderAll();
+  } catch (e) { console.error('Failed to load kommuner', e); }
+  kommunerLoading = false;
+}
+
+async function ensureTabellLoaded(tabellNr) {
+  if (!tabellNr || taxCache.tabeller[tabellNr]) return;
+  try {
+    await loadSkattetabell(tabellNr);
+    renderAll();
+  } catch (e) { console.error('Failed to load tabell ' + tabellNr, e); }
+}
+
 function defaultState() {
   return {
     children: [],
     parents: [
-      { name: 'Parent 1', salary: 45000, topups: [] },
-      { name: 'Parent 2', salary: 40000, topups: [] },
+      { name: 'Parent 1', salary: 45000, topups: [], kommun: '', forsamling: '', churchTax: false },
+      { name: 'Parent 2', salary: 40000, topups: [], kommun: '', forsamling: '', churchTax: false },
     ],
     rules: [],
   };
@@ -88,7 +210,9 @@ function loadState() {
     if (json) {
       const loaded = JSON.parse(json);
       state = { ...defaultState(), ...loaded };
-      state.parents = state.parents || defaultState().parents;
+      state.parents = (state.parents || defaultState().parents).map(p => ({
+        kommun: '', forsamling: '', churchTax: false, topups: [], ...p,
+      }));
       state.children = (state.children || []).map(c => ({
         ...c,
         usedDays: c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }],
@@ -283,12 +407,26 @@ function calculateTimeline() {
         }
       }
 
+      const grossIncome = totalLeaveIncome + workIncome + topupIncome;
+
+      const tabellNr = getTabellNr(state.parents[pi].kommun, state.parents[pi].forsamling, state.parents[pi].churchTax);
+      const table = tabellNr ? taxCache.tabeller[tabellNr] : null;
+
+      let netIncome = null;
+      if (table) {
+        const workGross = workIncome + topupIncome;
+        const taxOnWork = workGross > 0 ? (lookupTax(workGross, table, 'col1') || 0) : 0;
+        const taxOnFK = totalLeaveIncome > 0 ? (lookupTax(totalLeaveIncome, table, 'col1') || 0) : 0;
+        netIncome = grossIncome - taxOnWork - taxOnFK;
+      }
+
       return {
         leaveDays: totalLeaveDays,
         leaveIncome: totalLeaveIncome,
         workIncome,
         topupIncome,
-        totalIncome: totalLeaveIncome + workIncome + topupIncome,
+        totalIncome: grossIncome,
+        netIncome,
         avgDpw,
         leaveByChild,
       };
@@ -412,6 +550,49 @@ function renderChildren() {
   `;
 }
 
+function renderTaxFields(pi, p) {
+  const kommuner = taxCache.kommuner;
+  const kommunNames = kommuner ? Object.keys(kommuner).sort() : [];
+  const forsamlingar = (kommuner && p.kommun && kommuner[p.kommun]) ? kommuner[p.kommun].map(f => f.forsamling).sort() : [];
+  const tabellNr = getTabellNr(p.kommun, p.forsamling, p.churchTax);
+  const table = tabellNr ? taxCache.tabeller[tabellNr] : null;
+  const netExample = (table && p.salary > 0) ? p.salary - lookupTax(p.salary, table, 'col1') : null;
+
+  return `
+    <div class="mt-2 mb-2 space-y-1.5">
+      <div class="flex items-center gap-2">
+        <label class="text-xs text-slate-500 w-28">Kommun</label>
+        <select onchange="actions.updateParentTax(${pi},'kommun',this.value)"
+          class="flex-1 px-2 py-1 border rounded text-xs bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}">
+          <option value="">Select kommun...</option>
+          ${kommunNames.map(k => `<option value="${esc(k)}" ${p.kommun === k ? 'selected' : ''}>${esc(k)}</option>`).join('')}
+        </select>
+      </div>
+      ${p.kommun ? `<div class="flex items-center gap-2">
+        <label class="text-xs text-slate-500 w-28">Församling</label>
+        <select onchange="actions.updateParentTax(${pi},'forsamling',this.value)"
+          class="flex-1 px-2 py-1 border rounded text-xs bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}">
+          <option value="">Select...</option>
+          ${forsamlingar.map(f => `<option value="${esc(f)}" ${p.forsamling === f ? 'selected' : ''}>${esc(f)}</option>`).join('')}
+        </select>
+      </div>` : ''}
+      ${p.kommun ? `<div class="flex items-center gap-2">
+        <label class="text-xs text-slate-500 w-28">Church tax</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer">
+          <input type="checkbox" ${p.churchTax ? 'checked' : ''}
+            onchange="actions.updateParentTax(${pi},'churchTax',this.checked)"
+            class="rounded border-slate-300" />
+          <span class="text-slate-600">Medlem i Svenska kyrkan</span>
+        </label>
+      </div>` : ''}
+      ${tabellNr ? `<div class="text-xs text-slate-500">
+        Tax table: <strong>${tabellNr}</strong>${netExample !== null ? ` · Net salary: <strong>${formatKr(netExample)} kr</strong>` : ''}${!table ? ' <span class="text-amber-500">(loading...)</span>' : ''}
+      </div>` : ''}
+      ${!kommuner ? '<div class="text-xs text-slate-400 italic">Loading tax data...</div>' : ''}
+    </div>
+  `;
+}
+
 function renderParents() {
   return `
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
@@ -435,6 +616,7 @@ function renderParents() {
             <div class="flex items-center gap-2 mb-2">
               <span class="text-xs text-slate-500">FK daily rate (sjukpenning): <strong>${formatKr(calcDailyRate(p.salary))} kr</strong></span>
             </div>
+            ${renderTaxFields(pi, p)}
             <div class="mt-3 border-t pt-3" style="border-color: ${pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
               <div class="flex items-center justify-between mb-2">
                 <span class="text-xs font-medium text-slate-600">Company top-ups</span>
@@ -678,27 +860,57 @@ function renderTimeline(months) {
   const p0Name = state.parents[0].name;
   const p1Name = state.parents[1].name;
   const fullSalary = state.parents[0].salary + state.parents[1].salary;
-  const barBase = Math.max(fullSalary, ...months.map(m => m.parents[0].totalIncome + m.parents[1].totalIncome), 1);
+  const barBaseGross = Math.max(fullSalary, ...months.map(m => m.parents[0].totalIncome + m.parents[1].totalIncome), 1);
+  const anyNet = months.some(m => m.parents[0].netIncome !== null && m.parents[1].netIncome !== null);
+  let fullNetSalary = null;
+  if (anyNet) {
+    fullNetSalary = [0, 1].reduce((sum, pi) => {
+      const tn = getTabellNr(state.parents[pi].kommun, state.parents[pi].forsamling, state.parents[pi].churchTax);
+      const tbl = tn ? taxCache.tabeller[tn] : null;
+      const tax = tbl ? (lookupTax(state.parents[pi].salary, tbl, 'col1') || 0) : 0;
+      return sum + state.parents[pi].salary - tax;
+    }, 0);
+  }
+  const barBase = anyNet && fullNetSalary
+    ? Math.max(fullNetSalary, ...months.map(m => (m.parents[0].netIncome || 0) + (m.parents[1].netIncome || 0)), 1)
+    : barBaseGross;
 
   return `
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
       <h2 class="text-lg font-semibold text-slate-900 mb-4">Monthly Overview</h2>
+      <div class="flex items-center gap-2 py-1 px-2 mb-1 text-xs text-slate-400">
+        <span class="flex-shrink-0" style="width:5.5rem"></span>
+        <span class="flex-1 text-center">${anyNet ? 'Net income bar (scaled to full net salary)' : 'Income bar (scaled to full salary)'}</span>
+        ${anyNet ? '<span class="w-20 text-right flex-shrink-0">Gross</span><span class="w-20 text-right flex-shrink-0 font-medium">Net</span>' : '<span class="w-20 text-right flex-shrink-0">Total</span>'}
+        <span class="w-10 text-right flex-shrink-0">%</span>
+        <span class="w-4"></span>
+      </div>
       <div class="space-y-0.5">
         ${months.map((m, mi) => {
           const p0 = m.parents[0], p1 = m.parents[1];
           const familyTotal = p0.totalIncome + p1.totalIncome;
+          const hasNet = p0.netIncome !== null && p1.netIncome !== null;
+          const familyNet = hasNet ? p0.netIncome + p1.netIncome : null;
           const isActive = p0.leaveDays > 0 || p1.leaveDays > 0;
-          const pct = fullSalary > 0 ? Math.round(familyTotal / fullSalary * 100) : 100;
+          const pctBasis = hasNet ? familyNet : familyTotal;
+          const pctDenom = hasNet && fullNetSalary ? fullNetSalary : fullSalary;
+          const pct = pctDenom > 0 ? Math.round(pctBasis / pctDenom * 100) : 100;
           const pctColor = pct >= 95 ? 'text-slate-400' : pct >= 75 ? 'text-amber-600' : 'text-red-600';
 
           function parentDetail(p, name, color) {
-            if (p.leaveDays <= 0) return '<span class="text-xs text-slate-400">' + esc(name) + ': working (' + formatKr(p.totalIncome) + ')</span>';
+            if (p.leaveDays <= 0) {
+              const netNote = p.netIncome !== null ? ' · net ' + formatKr(p.netIncome) : '';
+              return '<span class="text-xs text-slate-400">' + esc(name) + ': working (' + formatKr(p.totalIncome) + netNote + ')</span>';
+            }
             const parts = [];
             parts.push(Math.round(p.leaveDays) + ' days leave');
             parts.push('FK ' + formatKr(p.leaveIncome));
             if (p.workIncome > 0) parts.push('Work ' + formatKr(p.workIncome));
             if (p.topupIncome > 0) parts.push('Top-up ' + formatKr(p.topupIncome));
-            return '<span class="text-xs" style="color:' + color + '">' + esc(name) + '</span><span class="text-xs text-slate-600">: ' + parts.join(' · ') + ' = <strong>' + formatKr(p.totalIncome) + '</strong></span>';
+            let result = '<span class="text-xs" style="color:' + color + '">' + esc(name) + '</span><span class="text-xs text-slate-600">: ' + parts.join(' · ') + ' = <strong>' + formatKr(p.totalIncome) + '</strong>';
+            if (p.netIncome !== null) result += ' · net <strong>' + formatKr(p.netIncome) + '</strong>';
+            result += '</span>';
+            return result;
           }
 
           return `
@@ -707,14 +919,15 @@ function renderTimeline(months) {
                 <span class="text-sm font-medium text-slate-700 flex-shrink-0" style="width:5.5rem">${m.year} ${monthName(m.month).slice(0,3)}</span>
                 <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
                   ${isActive ? `
-                    <div class="bar h-full" style="width:${p0.totalIncome / barBase * 100}%;background:#2563eb"></div>
-                    <div class="bar h-full" style="width:${p1.totalIncome / barBase * 100}%;background:#be185d"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p0.netIncome : p0.totalIncome) / barBase * 100}%;background:#2563eb"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:#be185d"></div>
                   ` : `
-                    <div class="bar h-full" style="width:${p0.totalIncome / barBase * 100}%;background:#93c5fd"></div>
-                    <div class="bar h-full" style="width:${p1.totalIncome / barBase * 100}%;background:#f9a8d4"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p0.netIncome : p0.totalIncome) / barBase * 100}%;background:#93c5fd"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:#f9a8d4"></div>
                   `}
                 </div>
-                <span class="w-20 text-sm font-bold text-right flex-shrink-0">${formatKr(familyTotal)}</span>
+                <span class="w-20 text-sm text-right flex-shrink-0 ${hasNet ? 'text-slate-400 text-xs' : 'font-bold'}">${formatKr(familyTotal)}</span>
+                ${hasNet ? `<span class="w-20 text-sm font-bold text-right flex-shrink-0">${formatKr(familyNet)}</span>` : ''}
                 <span class="w-10 text-xs ${pctColor} text-right flex-shrink-0">${pct}%</span>
                 ${isActive ? '<span class="w-4 text-xs text-slate-300 flex-shrink-0 tl-arrow" data-mi="' + mi + '">&#9654;</span>' : '<span class="w-4"></span>'}
               </div>
@@ -727,6 +940,81 @@ function renderTimeline(months) {
             </div>
           `;
         }).join('')}
+      </div>
+      ${renderLeaveSummary(months, anyNet, fullNetSalary)}
+    </div>
+  `;
+}
+
+function renderLeaveSummary(months, anyNet, fullNetSalary) {
+  const leaveMonths = months.filter(m => m.parents[0].leaveDays > 0 || m.parents[1].leaveDays > 0);
+  if (!leaveMonths.length) return '';
+
+  const totalMonths = months.length;
+  const summaries = [0, 1].map(pi => {
+    const name = state.parents[pi].name;
+    const salary = state.parents[pi].salary;
+    let fullGross = 0, actualGross = 0, fullNet = 0, actualNet = 0;
+    const hasNet = anyNet;
+
+    for (const m of months) {
+      const p = m.parents[pi];
+      fullGross += salary;
+      actualGross += p.totalIncome;
+      if (hasNet) {
+        const tn = getTabellNr(state.parents[pi].kommun, state.parents[pi].forsamling, state.parents[pi].churchTax);
+        const tbl = tn ? taxCache.tabeller[tn] : null;
+        const fullTax = tbl ? (lookupTax(salary, tbl, 'col1') || 0) : 0;
+        fullNet += salary - fullTax;
+        actualNet += p.netIncome !== null ? p.netIncome : p.totalIncome;
+      }
+    }
+
+    const lostGross = fullGross - actualGross;
+    const lostNet = hasNet ? fullNet - actualNet : null;
+    const pctRetainedGross = fullGross > 0 ? actualGross / fullGross * 100 : 100;
+    const pctRetainedNet = hasNet && fullNet > 0 ? actualNet / fullNet * 100 : null;
+
+    return { name, salary, fullGross, actualGross, lostGross, pctRetainedGross, fullNet, actualNet, lostNet, pctRetainedNet, hasNet };
+  });
+
+  const familyLostNet = anyNet ? summaries[0].lostNet + summaries[1].lostNet : null;
+  const familyLostGross = summaries[0].lostGross + summaries[1].lostGross;
+
+  return `
+    <div class="mt-4 pt-4 border-t border-slate-200">
+      <h3 class="text-sm font-semibold text-slate-700 mb-3">Parental Leave Income Impact (${totalMonths} months)</h3>
+      <div class="grid grid-cols-2 gap-3">
+        ${summaries.map((s, pi) => {
+          const color = pi === 0 ? '#2563eb' : '#be185d';
+          const bg = pi === 0 ? '#eff6ff' : '#fdf2f8';
+          const pct = s.hasNet ? s.pctRetainedNet : s.pctRetainedGross;
+          const lost = s.hasNet ? s.lostNet : s.lostGross;
+          return `
+            <div class="p-3 rounded-lg text-xs space-y-1" style="background:${bg}">
+              <div class="font-medium text-sm" style="color:${color}">${esc(s.name)}</div>
+              <div class="text-slate-600">
+                ${s.hasNet
+                  ? `Full net salary: <strong>${formatKr(s.fullNet)} kr</strong> over ${totalMonths} mo`
+                  : `Full gross salary: <strong>${formatKr(s.fullGross)} kr</strong> over ${totalMonths} mo`}
+              </div>
+              <div class="text-slate-600">
+                ${s.hasNet
+                  ? `Actual net income: <strong>${formatKr(s.actualNet)} kr</strong>`
+                  : `Actual gross income: <strong>${formatKr(s.actualGross)} kr</strong>`}
+              </div>
+              <div class="font-medium" style="color:${color}">
+                Lost income: <strong>${formatKr(lost)} kr</strong> (${(100 - pct).toFixed(1)}% reduction)
+              </div>
+              <div class="h-2 bg-slate-200 rounded-full overflow-hidden mt-1">
+                <div class="bar h-full rounded-full" style="width:${pct}%;background:${color}"></div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+      <div class="text-xs text-slate-500 text-center mt-2">
+        Total family lost income: <strong>${formatKr(anyNet ? familyLostNet : familyLostGross)} kr</strong> over the period
       </div>
     </div>
   `;
@@ -765,6 +1053,17 @@ window.actions = {
     state.parents[pi][field] = value;
     saveState();
     renderAll();
+  },
+  updateParentTax(pi, field, value) {
+    const p = state.parents[pi];
+    p[field] = value;
+    if (field === 'kommun') {
+      p.forsamling = '';
+    }
+    saveState();
+    renderAll();
+    const tabellNr = getTabellNr(p.kommun, p.forsamling, p.churchTax);
+    if (tabellNr) ensureTabellLoaded(tabellNr);
   },
   addTopup(pi) {
     state.parents[pi].topups.push({ ci: '', pct: 10, months: 6 });
@@ -836,6 +1135,12 @@ function renderAll() {
 // --- INIT ---
 loadState();
 renderAll();
+ensureKommunerLoaded().then(() => {
+  for (const p of state.parents) {
+    const tn = getTabellNr(p.kommun, p.forsamling, p.churchTax);
+    if (tn) ensureTabellLoaded(tn);
+  }
+});
 </script>
 </body>
 </html>
