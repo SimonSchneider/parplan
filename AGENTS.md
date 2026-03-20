@@ -1,0 +1,164 @@
+# AGENTS.md — parplan
+
+**Start here** when working on this repository in an agent or automated context.
+
+## 1. Project snapshot
+
+- **Name:** Föräldrapenning Planner (parplan)
+- **Purpose:** Plan parental leave for **two parents** in Sweden. Day pools, leave rules, income/tax estimates, and a **suggested yearly plan** for remaining days are based on **Försäkringskassan-style** limits encoded as constants (aligned with **2026** in code and tax dataset year).
+- **Codebase shape:** Almost everything is in a single file: [`index.html`](index.html) (Tailwind via CDN, LZ-String, inline JavaScript). **No build step.** Other tracked files: [`.gitignore`](.gitignore), [`README.md`](README.md) (short intro + link here), and this file.
+
+## 2. State and persistence
+
+| Mechanism | What it stores |
+|-----------|----------------|
+| In-memory `state` | Children, parents (salary, tax fields, top-ups), leave rules, yearly plans, per-child used days, etc. Initialized from `defaultState()` and merged on load. |
+| URL hash + LZString | **Primary shareable state.** `saveState()` serializes `state` to JSON, compresses with LZString, writes `history.replaceState` with `#<compressed>`. `loadState()` reads `location.hash` and merges into `state`. |
+| `localStorage` `skv_*` | Cached Skatteverket kommuner/tabell data (TTL ~7 days). See `cacheGet` / `cacheSet` in `index.html`. |
+| `localStorage` `parplan_collapsedSections` | JSON array of collapsible section ids that are **closed**; restored on load so `<details>` state survives reloads. |
+
+## 3. UI architecture
+
+### Layout
+
+- Container: `max-w-[1920px]`, padded.
+- **Two panes:** `#left-pane` (config), `#right-pane` (results).
+- Responsive: `flex-col` below `lg`, `lg:flex-row` side-by-side; each pane scrolls (`overflow-y-auto`, max height tied to viewport).
+
+### Collapsible sections
+
+- Helper: `collapsible(id, title, summary, content)` → `<details>` with header title + one-line summary.
+- Global `collapsedSections` (`Set`); `toggle` listener updates set and calls `saveCollapsedState()`.
+- Section ids are stable strings (e.g. `children`, `yearly-plans`, `remaining-days`).
+
+### Pane content order
+
+**Left (config), top to bottom:**
+
+1. Children — `renderChildren()`
+2. Parents — `renderParents()`
+3. Day Pool / Used — `renderChildSetup()`
+4. Leave Rules — `renderRules()`
+5. Planned Yearly Leave — `renderYearlyPlans()` (extracted from remaining-days; **not** embedded in suggested plan body)
+
+**Right (results), top to bottom:**
+
+1. Warnings — `renderWarnings(timeline.warnings)`
+2. Day Balance — `renderDayBalance(timeline.consumed)`
+3. Monthly Overview — `renderTimeline(timeline.months)`
+4. Remaining Days — `renderRemainingDays(timeline.consumed, timeline.months)` (includes yearly plan UI)
+
+### Render pipeline
+
+- `renderAll()`: sorts `state.rules` and `state.yearlyPlans`, runs **`calculateTimeline()` once**, sets `left-pane` / `right-pane` innerHTML from `renderConfig()` / `renderResults(timeline)`.
+- If there are no timeline months, results show a single empty-state collapsible instead of full panes.
+
+## 4. Core computation
+
+### `calculateTimeline()` (~line 279 in `index.html`)
+
+- Builds a month range from leave rules (and related bounds).
+- For each month and each parent, applies rules → leave days and income; allocates **sjukpenning** vs **lägstanivå** per child using shared pool remaining (`getSharedPoolRemaining`, `consumed`).
+- **Output:** `{ months, consumed, warnings }`
+  - `consumed[childId][parentIndex]` → `{ sjuk, lagsta }` cumulative.
+  - Each month: `{ year, month, parents: [ { leaveByChild, leaveDays, income fields, ... }, ... ] }` where `leaveByChild[childId] = { sjuk, lagsta }` for that parent that month.
+
+### `FK` constants object
+
+Central limits (examples — see `index.html` for full list):
+
+- `SJUK_DAYS_TOTAL`, `LAGSTA_DAYS_TOTAL`, per-parent caps
+- `RESERVED_SJUK`, `FIRST_SJUK_REQUIREMENT`
+- `SAVE_LIMIT_4YR` (split between “must use before age 4” vs “saveable to age 12”)
+- `LAGSTA_DAILY`, sjuk daily min/max caps, `PRISBASBELOPP`, etc.
+
+**When changing Swedish rules:** update `FK` and trace callers (`calculateTimeline`, remaining-days pools, warnings).
+
+### Tax data
+
+- `SKV_KOMMUN_URL`, `SKV_TABELL_URL`, `TAX_YEAR` (2026) — Skatteverket rowstore APIs; kommuner/församlingar drive tabell lookup and optional net salary in timeline.
+
+## 5. Yearly plan (Remaining Days section) — product rules
+
+This block is **not** the same as the monthly timeline: it suggests how to spread **remaining** parental benefit days across future years, then **merges** with days already implied by leave rules.
+
+### Combined display: “Yearly plan (leave rules + suggested)”
+
+- **(A) Leave rules:** Per calendar year, sum `timeline.months` → both parents’ `leaveByChild` → total sjuk + lagsta per child (and aggregate `rulesTotal`, `rulesSjuk`, `rulesLagsta` for the year).
+- **(B) Suggested:** Distribution of remaining pool days (planned yearly entries + “before age 4” + “before age 12” pools) into month slots, then rolled up by year.
+- **UI:** One row per year with **total = rules + suggested**; stacked bar — **slate** = rules, **blue** = suggested sjukpenning, **amber** = suggested lägstanivå. Expand for per-child rules text and “Suggested from: …”.
+
+### Suggested distribution (internal)
+
+- **Month-based internally, year-based in the UI:** `monthSlots` from `planStart` (latest rule end vs “now”) through the relevant year range (includes any year appearing in planned yearly leave).
+- **Full vs partial years:** A calendar year is “full” for a pool if the entire year lies in `[poolStart, poolEnd]`. The pool’s days are split between full-year weight and partial-year weight; **full years** get a dedicated share, then **partial** months get the rest proportional to **segment day counts** (intersection of month with pool window).
+- **Evenness across years:** For the full-year portion of a pool, per-year amounts are chosen so **resulting year totals** (including days already placed from **earlier** pools in the same loop) are as balanced as possible — not simply `poolDays / numFullYears` ignoring other children’s earlier allocations.
+- **“Suggested from” line:** Multiple sources with the same `(child, label)` are **aggregated** (days summed) before display.
+
+### Planned yearly leave interaction
+
+- Years that have at least one planned entry: **every month** in that calendar year is marked `fixed` so **no** suggested pool days are placed there.
+- Planned days are attached to the **first month slot that exists** for that year (handles `planStart` mid-year — not always January).
+- **Deduction:** Total planned days are subtracted from pool `days` (generic deduction loop) before distributing the rest.
+
+### Pool definitions (remaining days)
+
+- Pools are built per child from remaining sjuk/lagsta vs `FK` limits; split into:
+  - **“before age 4”** — must use beyond saveable limit; deadline = 4th birthday.
+  - **“before age 12”** — saveable portion; deadline = 12th birthday.
+- **Window start:**
+  - **Before age 4:** `poolStart = planStart` (same as timeline planning start).
+  - **Before age 12:** `poolStart` = that child’s **age-4 date** (`windowStart` on pool) — do **not** place “before 12” days in months before the child turns 4.
+
+### Cross-child priority (before 12 vs before 4)
+
+- Compute **`latestBefore4Deadline`** = max deadline among all **“before age 4”** pools.
+- **“Before age 12”** pools only use month slots with **`monthStart > latestBefore4Deadline`**, so another child’s flexible days are not placed in years where any child still has urgent “before age 4” time left.
+
+## 6. External dependencies
+
+- **Tailwind CSS** — CDN script in `index.html`.
+- **LZ-String** — compression for URL state.
+- **Skatteverket** rowstore URLs — kommuner and tax tables (`SKV_*` constants).
+
+## 7. Conventions for future changes
+
+1. Prefer editing [`index.html`](index.html) unless you intentionally split the app.
+2. After changing **timeline**, **warnings**, or **yearly plan** behavior, update **this file** in the same change set so agents stay aligned.
+3. User-controlled strings in HTML must go through **`esc()`** to avoid XSS.
+4. New collapsible sections: pick a **stable `id`**, add summary helper if needed, include in `renderConfig` or `renderResults` as appropriate.
+
+## 8. Quick reference — key symbols
+
+| Symbol | Role |
+|--------|------|
+| `state` | Application data |
+| `calculateTimeline` | Rules → months + consumed + warnings |
+| `renderRemainingDays(consumed, months)` | Pools, month distribution, yearly rows + rules merge |
+| `renderConfig` / `renderResults` | Left / right pane HTML |
+| `actions` | User event handlers (mutate state, save, renderAll) |
+| `FK` | Försäkringskassan-style numeric limits |
+
+## 9. Diagram (high level)
+
+```mermaid
+flowchart LR
+  subgraph ui [UI]
+    LP[leftPane]
+    RP[rightPane]
+  end
+  subgraph data [State]
+    S[state]
+    H[URL hash LZString]
+    L[localStorage tax collapse]
+  end
+  subgraph calc [Calculation]
+    CT[calculateTimeline]
+    RD[renderRemainingDays]
+  end
+  S --> H
+  S --> CT
+  CT --> RD
+  CT --> RP
+  LP --> S
+```
