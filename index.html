@@ -1091,24 +1091,59 @@ function generateWarnings(consumed, monthResults) {
     }
   }
 
-  for (const mr of monthResults) {
+  const sgiChildIds = new Set();
+  for (const child of state.children) {
+    if (!child.birthDate) continue;
+    sgiChildIds.add(child.id);
+  }
+  if (sgiChildIds.size && monthResults.length) {
+    const firstYear = monthResults[0].year;
+    const firstMonth = monthResults[0].month;
+    const lastMr = monthResults[monthResults.length - 1];
+    const lastYear = lastMr.year;
+    const lastMonth = lastMr.month;
+    const rangeStart = new Date(firstYear, firstMonth - 1, 1);
+    const rangeEnd = new Date(lastYear, lastMonth, 0);
+
+    const derivedCache = {};
+    for (let yr = firstYear; yr <= lastYear; yr++) derivedCache[yr] = deriveParentalFromRules(yr);
+    const vacSets = [vacationDateSetForParent(0), vacationDateSetForParent(1)];
+
     for (let pi = 0; pi < 2; pi++) {
-      const pr = mr.parents[pi];
-      for (const ci in pr.leaveByChild) {
-        const child = state.children.find(c => c.id === ci);
+      const weekFpDays = {};
+      const vacSet = vacSets[pi];
+      let d = new Date(rangeStart);
+      while (d <= rangeEnd) {
+        const key = toYMD(d);
+        if (!vacSet.has(key)) {
+          const derived = derivedCache[d.getFullYear()];
+          const slots = resolveParentalSlots(key, derived);
+          const s = slots[pi];
+          if (s && sgiChildIds.has(s.ci)) {
+            const iw = isoWeekNumber(d);
+            const wk = iw.year + '-W' + String(iw.week).padStart(2, '0');
+            if (!weekFpDays[wk]) weekFpDays[wk] = { days: 0, ci: s.ci, monday: new Date(d) };
+            weekFpDays[wk].days += 1;
+          }
+        }
+        d = addDaysDate(d, 1);
+      }
+
+      for (const [wk, info] of Object.entries(weekFpDays)) {
+        if (info.days >= 5) continue;
+        const child = state.children.find(c => c.id === info.ci);
         if (!child || !child.birthDate) continue;
         const bd = parseDate(child.birthDate);
         const firstBirthday = new Date(bd);
         firstBirthday.setFullYear(firstBirthday.getFullYear() + 1);
-        const monthDate = new Date(mr.year, mr.month - 1, 15);
+        if (info.monday < firstBirthday) continue;
+        const preschoolStart = child.preschoolDate ? parseDate(child.preschoolDate) : null;
+        if (preschoolStart && info.monday >= preschoolStart) continue;
 
-        if (monthDate >= firstBirthday && pr.avgDpw > 0 && pr.avgDpw < 5) {
-          warnings.push({
-            type: 'info',
-            msg: `${state.parents[pi].name} is taking ${pr.avgDpw.toFixed(1)} days/week in ${monthName(mr.month)} ${mr.year} (${child.name} is over 1). Taking fewer than 5 days/week after the child's first birthday may affect SGI protection.`,
-          });
-          break;
-        }
+        warnings.push({
+          type: 'info',
+          msg: `${state.parents[pi].name} tar ${info.days} FP-dagar vecka ${wk} (${child.name} är över 1 år). Färre än 5 dagar/vecka efter barnets 1-årsdag kan påverka SGI-skyddet.`,
+        });
       }
     }
   }
