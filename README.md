@@ -13,11 +13,15 @@ docker run --rm -p 8080:80 parplan
 
 Then open <http://localhost:8080> (nginx Alpine serves `index.html`).
 
+**Apple Silicon → Linux server:** Images built on a Mac are often **arm64**; many Linux VPS are **amd64** (`x86_64`). That mismatch causes `exec format error` in the container. The **Makefile** defaults to **`--platform linux/amd64`** so `make build` / `make push` produce an image that runs on typical servers. Use `make push PLATFORM=linux/arm64` if your host is ARM.
+
 Publish to **GHCR** (`ghcr.io/simonschneider/parplan:main`) — log in once with a GitHub PAT (`read:packages`, `write:packages`):
 
 ```bash
 docker login ghcr.io -u USERNAME
 make push
 ```
+
+Use **Podman** instead of Docker: `make DOCKER=podman push`.
 
 **For architecture, data flow, and product decisions** (especially the yearly-plan logic), see **[AGENTS.md](AGENTS.md)** — intended for contributors and coding agents.
