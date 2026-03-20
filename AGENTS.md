@@ -44,24 +44,25 @@
 
 **Right (results), top to bottom:**
 
-1. Årskalender — `renderYearCalendarMain(timeline)` (painted vacation + overrides; stats use the same `timeline` as the rest of the app)
-2. Dagsaldo — `renderDayBalance(timeline.consumed)`
-3. Månadsöversikt — `renderTimeline(timeline.months)`
-4. Kvarvarande dagar — `renderRemainingDays(timeline.consumed, timeline.months)` (includes yearly plan UI)
-5. Varningar — `renderWarnings(timeline.warnings)` (last)
+1. Varningar — `renderWarnings(timeline.warnings)` (first, so errors stay visible)
+2. Årskalender — `renderYearCalendarMain(timeline)` (painted vacation + overrides; stats use the same `timeline` as the rest of the app)
+3. Dagsaldo — `renderDayBalance(timeline.consumed)`
+4. Månadsöversikt — `renderTimeline(timeline.months)`
+5. Kvarvarande dagar — `renderRemainingDays(timeline.consumed, timeline.months)` (includes yearly plan UI)
 
 ### Render pipeline
 
 - `renderAll()`: sorts `state.rules` and `state.yearlyPlans`; **`beginRenderCycle()`** builds per-render caches (vacation sets, child ids, **`deriveParentalFromRules(year)`** via `derivedByYear`, holiday maps); runs **`calculateTimeline()` once**; sets `left-pane` / `right-pane` from **`renderConfig(timeline)`** / **`renderResults(timeline)`**; **`endRenderCycle()`** clears caches.
 - FP assignment: **`resolveParentalAssignment`** merges **`deriveParentalFromRules`** (from rules) with **`calendarParentalOverrides`**.
 - `computeYearCalendarStats(year, timeline)` takes the precomputed timeline (no second `calculateTimeline()` per year).
-- If there are no timeline months, results show Årskalender plus one collapsible with an empty-state message (no dagsaldo / månadsöversikt / kvarvarande / varningar blocks).
+- If there are no timeline months, results show **Varningar** first, then Årskalender, then a collapsible empty-state message (no dagsaldo / månadsöversikt / kvarvarande blocks).
 
 ## 4. Core computation
 
 ### `calculateTimeline()` (see `index.html`)
 
-- Builds a month range from **children `birthDate`**, **`state.rules`** (start/end), **`calendarParentalOverrides`** date keys, and **`calendarVacation`** segments.
+- Orchestrates **`computeTimelineDateRange()`** (min/max dates), **`buildMonthRange()`**, **`initConsumedFromChildren()`**, then per month **`computeParentMonth(pi, …)`** (mutates `consumed` and top-up month counters). Helpers: **`extendDateRange`** for date bounds.
+- Date range sources: **children `birthDate`**, **`state.rules`** (start/end), **`calendarParentalOverrides`** date keys, and **`calendarVacation`** segments.
 - For each month and each parent, resolves FP per day from derived rules + overrides + vacation mask → leave days and income; allocates **sjukpenning** vs **lägstanivå** per child using shared pool remaining (`getSharedPoolRemaining`, `consumed`).
 - **Output:** `{ months, consumed, warnings }`
   - `consumed[childId][parentIndex]` → `{ sjuk, lagsta }` cumulative.
@@ -81,6 +82,7 @@ Central limits (examples — see `index.html` for full list):
 ### Tax data
 
 - `SKV_KOMMUN_URL`, `SKV_TABELL_URL`, `TAX_YEAR` (2026) — Skatteverket rowstore APIs; kommuner/församlingar drive tabell lookup and optional net salary in timeline.
+- Failed kommuner load sets **`taxKommunerError`** and shows retry via **`actions.retryTaxKommuner()`** in the tax fields UI.
 
 ## 5. Yearly plan (Remaining Days section) — product rules
 
@@ -94,6 +96,7 @@ This block is **not** the same as the monthly timeline: it suggests how to sprea
 
 ### Suggested distribution (internal)
 
+- Implementation is split into helpers (see `index.html`): **`buildRemainingPools`**, **`buildRemainingMonthSlots`**, **`mergeYearlyPlansIntoMonthSlots`**, **`deductPlannedFromRemainingPools`**, **`distributeRemainingPoolsToMonthSlots`**, **`foldRemainingMonthSlotsToYearSlots`**, **`assignSjukLagstaToYearSlots`**, **`mergeCalendarRulesIntoYearSlots`**; **`renderRemainingDays`** composes them and renders HTML.
 - **Month-based internally, year-based in the UI:** `monthSlots` from `planStart` (latest **`state.rules[].end`** vs “now”) through the relevant year range (includes any year appearing in planned yearly leave).
 - **Full vs partial years:** A calendar year is “full” for a pool if the entire year lies in `[poolStart, poolEnd]`. The pool’s days are split between full-year weight and partial-year weight; **full years** get a dedicated share, then **partial** months get the rest proportional to **segment day counts** (intersection of month with pool window).
 - **Evenness across years:** For the full-year portion of a pool, per-year amounts are chosen so **resulting year totals** (including days already placed from **earlier** pools in the same loop) are as balanced as possible — not simply `poolDays / numFullYears` ignoring other children’s earlier allocations.
@@ -137,10 +140,13 @@ This block is **not** the same as the monthly timeline: it suggests how to sprea
 | Symbol | Role |
 |--------|------|
 | `state` | Application data |
+| `mutate(fn)` | Runs `fn()`, then `saveState()` + `renderAll()` (most `actions.*` handlers) |
+| `freshUsedDays()` | Returns a fresh `[{ sjuk, lagsta }, …]` default for `usedDays` |
+| `PARENT_COLORS` / `pc(pi, key)` | Shared parent palette (`main`, `bg`, `border`, `light`, `bar`) |
 | `calculateTimeline` | Rules + calendar overrides + vacation → months + consumed + warnings |
 | `renderRemainingDays(consumed, months)` | Pools, month distribution, yearly rows + rules merge |
 | `renderConfig` / `renderResults` | Left / right pane HTML |
-| `actions` | User event handlers (mutate state, save, renderAll) |
+| `actions` | User event handlers (mostly via `mutate`) |
 | `FK` | Försäkringskassan-style numeric limits |
 
 ## 9. Diagram (high level)

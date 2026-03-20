@@ -12,16 +12,12 @@
     .bar { transition: width 0.3s ease; }
     input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
     input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-    .tooltip { position: relative; }
-    .tooltip .tip { display: none; position: absolute; z-index: 50; bottom: 100%; left: 50%; transform: translateX(-50%);
-      background: #1e293b; color: white; padding: 6px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap; margin-bottom: 4px; }
-    .tooltip:hover .tip { display: block; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
     .tl-arrow { transition: transform 0.15s; display: inline-block; }
     .tl-arrow.open { transform: rotate(90deg); }
     .collapsible-section summary::-webkit-details-marker { display: none; }
     .collapsible-section .collapsible-chevron { transition: transform 0.2s; }
     .collapsible-section[open] .collapsible-chevron { transform: rotate(180deg); }
-    @media (max-width: 768px) { .desktop-only { display: none; } }
     .year-cal-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .year-cal-grid { display: grid; grid-auto-rows: 14px; gap: 1px; user-select: none; }
     .year-cal-wk { font-size: 9px; color: #64748b; text-align: right; padding-right: 4px; line-height: 14px; }
@@ -77,6 +73,54 @@ const FK = {
 let _id = 0;
 function nextId() { return 'id' + (++_id) + '_' + Date.now().toString(36); }
 
+/** Fresh copy — never share one array between children. */
+function freshUsedDays() {
+  return [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+}
+
+const PARENT_COLORS = [
+  { main: '#2563eb', bg: '#eff6ff', border: '#bfdbfe', light: '#93c5fd', bar: '#60a5fa' },
+  { main: '#be185d', bg: '#fdf2f8', border: '#fbcfe8', light: '#f9a8d4', bar: '#f472b6' },
+];
+function pc(pi, key) { return PARENT_COLORS[pi][key]; }
+
+function inputCls(size, extra = '') {
+  const base = 'border border-slate-300 rounded bg-white';
+  const sizes = {
+    sm: 'px-2 py-1 text-sm',
+    xs: 'px-2 py-1 text-xs',
+    compact: 'px-1.5 py-0.5 text-xs',
+    wide: 'w-full px-1.5 py-0.5 text-xs',
+  };
+  return `${base} ${sizes[size] || sizes.sm} ${extra}`.trim();
+}
+
+function emptyMsg(text, variant = 'italic') {
+  const v = variant === 'xs' ? 'text-xs text-slate-400 italic mb-1' : 'text-slate-400 text-sm italic';
+  return `<p class="${v}">${esc(text)}</p>`;
+}
+
+function childSelectOptions(selectedId) {
+  return state.children.map(c =>
+    `<option value="${esc(c.id)}" ${selectedId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`
+  ).join('');
+}
+
+function removeBtn(onclick, extraClass = 'text-lg') {
+  return `<button type="button" onclick="${onclick}" class="text-red-400 hover:text-red-600 ${extraClass} font-bold leading-none" title="Ta bort">&times;</button>`;
+}
+
+/** Stacked horizontal bar segments; pct should be 0–100 of the *track* (caller scales). */
+function barSegmentsHtml(segments, trackClass = 'h-3 bg-slate-200 rounded-full overflow-hidden flex') {
+  return `<div class="${trackClass}">${segments.map(s =>
+    `<div class="bar h-full${s.rounded ? ' rounded-full' : ''}" style="width:${s.pct}%;background:${s.color}" title="${esc(s.title)}"></div>`
+  ).join('')}</div>`;
+}
+
+function btnPrimary() {
+  return 'px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-sm rounded-lg font-medium transition disabled:opacity-50 disabled:cursor-not-allowed';
+}
+
 // --- TAX API ---
 
 const SKV_KOMMUN_URL = 'https://skatteverket.entryscape.net/rowstore/dataset/c67b320b-ffee-4876-b073-dd9236cd2a99';
@@ -85,6 +129,7 @@ const TAX_YEAR = '2026';
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const taxCache = { kommuner: null, tabeller: {} };
+let taxKommunerError = null;
 
 function cacheGet(key) {
   try {
@@ -192,11 +237,17 @@ let kommunerLoading = false;
 async function ensureKommunerLoaded() {
   if (kommunerLoaded || kommunerLoading) return;
   kommunerLoading = true;
+  taxKommunerError = null;
   try {
     await loadKommuner();
     kommunerLoaded = true;
+    taxKommunerError = null;
     renderAll();
-  } catch (e) { console.error('Failed to load kommuner', e); }
+  } catch (e) {
+    console.error('Failed to load kommuner', e);
+    taxKommunerError = 'Kunde inte ladda skattedata. Kontrollera din anslutning och försök igen.';
+    renderAll();
+  }
   kommunerLoading = false;
 }
 
@@ -205,7 +256,10 @@ async function ensureTabellLoaded(tabellNr) {
   try {
     await loadSkattetabell(tabellNr);
     renderAll();
-  } catch (e) { console.error('Failed to load tabell ' + tabellNr, e); }
+  } catch (e) {
+    console.error('Failed to load tabell ' + tabellNr, e);
+    renderAll();
+  }
 }
 
 function defaultState() {
@@ -252,7 +306,7 @@ function loadState() {
       state.children = (state.children || []).map(c => ({
         ...c,
         preschoolDate: c.preschoolDate || '',
-        usedDays: c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }],
+        usedDays: c.usedDays || freshUsedDays(),
       }));
       state.rules = state.rules || [];
       state.yearlyPlans = state.yearlyPlans || [];
@@ -906,44 +960,39 @@ function getSharedPoolRemaining(childId, consumed) {
   }));
 }
 
-function calculateTimeline() {
-  if (!state.children.length) return { months: [], consumed: {}, warnings: [] };
+function extendDateRange(range, d) {
+  if (!d) return;
+  if (!range.min || d < range.min) range.min = new Date(d);
+  if (!range.max || d > range.max) range.max = new Date(d);
+}
 
-  let minDate = null, maxDate = null;
+/** @returns {{ min: Date, max: Date } | null} */
+function computeTimelineDateRange() {
+  const range = { min: null, max: null };
   for (const c of state.children) {
-    if (c.birthDate) {
-      const d = parseDate(c.birthDate);
-      if (!minDate || d < minDate) minDate = new Date(d);
-    }
+    if (c.birthDate) extendDateRange(range, parseDate(c.birthDate));
   }
   for (const dateKey of Object.keys(state.calendarParentalOverrides || {})) {
-    const d = parseDate(dateKey);
-    if (!d) continue;
-    if (!minDate || d < minDate) minDate = new Date(d);
-    if (!maxDate || d > maxDate) maxDate = new Date(d);
+    extendDateRange(range, parseDate(dateKey));
   }
   for (const seg of (state.calendarVacation || [])) {
-    const a = parseDate(seg.start);
-    const b = parseDate(seg.end);
-    if (a && (!minDate || a < minDate)) minDate = new Date(a);
-    if (b && (!maxDate || b > maxDate)) maxDate = new Date(b);
+    extendDateRange(range, parseDate(seg.start));
+    extendDateRange(range, parseDate(seg.end));
   }
   for (const r of state.rules || []) {
-    if (r.start) {
-      const d = parseDate(r.start);
-      if (!minDate || d < minDate) minDate = new Date(d);
-    }
-    if (r.end) {
-      const d = parseDate(r.end);
-      if (!maxDate || d > maxDate) maxDate = new Date(d);
-    }
+    if (r.start) extendDateRange(range, parseDate(r.start));
+    if (r.end) extendDateRange(range, parseDate(r.end));
   }
-  if (!minDate) return { months: [], consumed: {}, warnings: [] };
-  if (!maxDate) {
-    maxDate = new Date(minDate);
-    maxDate.setFullYear(maxDate.getFullYear() + 2);
+  if (!range.min) return null;
+  if (!range.max) {
+    const max = new Date(range.min);
+    max.setFullYear(max.getFullYear() + 2);
+    range.max = max;
   }
+  return range;
+}
 
+function buildMonthRange(minDate, maxDate) {
   const months = [];
   let y = minDate.getFullYear(), m = minDate.getMonth() + 1;
   const ey = maxDate.getFullYear(), em = maxDate.getMonth() + 1;
@@ -952,140 +1001,155 @@ function calculateTimeline() {
     m++;
     if (m > 12) { m = 1; y++; }
   }
+  return months;
+}
 
+function initConsumedFromChildren() {
   const consumed = {};
   for (const c of state.children) {
-    const ud = c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const ud = c.usedDays || freshUsedDays();
     consumed[c.id] = [
       { sjuk: ud[0].sjuk || 0, lagsta: ud[0].lagsta || 0 },
       { sjuk: ud[1].sjuk || 0, lagsta: ud[1].lagsta || 0 },
     ];
   }
+  return consumed;
+}
 
+/**
+ * One parent’s result for one calendar month. Mutates `consumed` and `topupMonths`.
+ */
+function computeParentMonth(pi, year, month, consumed, topupMonths) {
+  const mDays = daysInMonth(year, month);
+  let totalLeaveDays = 0;
+  let totalLeaveIncome = 0;
+  const leaveByChild = {};
+
+  const childIds = getChildIdSet();
+  const derivedForYear = getDerivedForYear(year);
+
+  const vacSet = getVacationSetForParent(pi);
+  const prePreschoolWeekKeys = new Set();
+  const daysByChild = {};
+  let paidCalendarDays = 0;
+  for (let day = 1; day <= mDays; day++) {
+    const dateObj = new Date(year, month - 1, day);
+    const key = toYMD(dateObj);
+    if (vacSet.has(key)) {
+      paidCalendarDays += 1;
+      continue;
+    }
+    const assignment = resolveParentalAssignment(key, derivedForYear);
+    const p = assignment.slots[pi];
+    if (p && childIds.has(p.ci)) {
+      if (!daysByChild[p.ci]) daysByChild[p.ci] = 0;
+      daysByChild[p.ci] += 1;
+      const iw0 = isoWeekNumber(dateObj);
+      const ch = state.children.find(c => c.id === p.ci);
+      const ps = ch && ch.preschoolDate ? parseDate(ch.preschoolDate) : null;
+      if (!ps || dateObj < ps) prePreschoolWeekKeys.add(iw0.year + '|' + iw0.week);
+      if (!topupMonths[pi][p.ci]) topupMonths[pi][p.ci] = 0;
+      if (ps && dateObj >= ps) continue;
+    }
+    const iw = isoWeekNumber(dateObj);
+    const wkKey = iw.year + '|' + iw.week;
+    if (!prePreschoolWeekKeys.has(wkKey)) paidCalendarDays += 1;
+  }
+
+  const sjukRate = calcDailyRate(state.parents[pi].salary);
+  for (const ci in daysByChild) {
+    const daysNeeded = daysByChild[ci];
+    const pool = getSharedPoolRemaining(ci, consumed);
+    const sjukRemaining = pool[pi].sjuk;
+    const lagstaRemaining = pool[pi].lagsta;
+    const totalChildSjuk = consumed[ci][0].sjuk + consumed[ci][1].sjuk;
+    const lagstaUnlocked = totalChildSjuk >= FK.FIRST_SJUK_REQUIREMENT;
+
+    const sjukDays = Math.min(daysNeeded, sjukRemaining);
+    const lagstaDays = lagstaUnlocked
+      ? Math.min(daysNeeded - sjukDays, lagstaRemaining)
+      : 0;
+    const totalDays = sjukDays + lagstaDays;
+
+    totalLeaveDays += totalDays;
+    totalLeaveIncome += sjukDays * sjukRate + lagstaDays * FK.LAGSTA_DAILY;
+
+    if (!leaveByChild[ci]) leaveByChild[ci] = { sjuk: 0, lagsta: 0 };
+    leaveByChild[ci].sjuk += sjukDays;
+    leaveByChild[ci].lagsta += lagstaDays;
+
+    consumed[ci][pi].sjuk += sjukDays;
+    consumed[ci][pi].lagsta += lagstaDays;
+  }
+
+  for (const ci in leaveByChild) {
+    if (leaveByChild[ci].sjuk > 0 || leaveByChild[ci].lagsta > 0) {
+      if (!topupMonths[pi][ci]) topupMonths[pi][ci] = 0;
+      topupMonths[pi][ci]++;
+    }
+  }
+
+  const avgDpw = mDays > 0 ? totalLeaveDays / (mDays / 7) : 0;
+  const salary = state.parents[pi].salary;
+
+  const workFraction = mDays > 0
+    ? Math.max(0, Math.min(1, paidCalendarDays / mDays))
+    : 1;
+  const workIncome = workFraction * salary;
+
+  const leaveFrac = mDays > 0
+    ? Math.max(0, Math.min(1, (mDays - paidCalendarDays) / mDays))
+    : 0;
+  let topupIncome = 0;
+  for (const tu of state.parents[pi].topups) {
+    if (leaveByChild[tu.ci] && topupMonths[pi][tu.ci] <= tu.months) {
+      topupIncome += salary * (tu.pct / 100) * leaveFrac;
+    }
+  }
+
+  const grossIncome = totalLeaveIncome + workIncome + topupIncome;
+
+  const tabellNr = getTabellNr(state.parents[pi].kommun, state.parents[pi].forsamling, state.parents[pi].churchTax);
+  const table = tabellNr ? taxCache.tabeller[tabellNr] : null;
+
+  let netIncome = null;
+  if (table) {
+    const workGross = workIncome + topupIncome;
+    const taxOnWork = workGross > 0 ? (lookupTax(workGross, table, 'col1') || 0) : 0;
+    const taxOnFK = totalLeaveIncome > 0 ? (lookupTax(totalLeaveIncome, table, 'col1') || 0) : 0;
+    netIncome = grossIncome - taxOnWork - taxOnFK;
+  }
+
+  return {
+    leaveDays: totalLeaveDays,
+    leaveIncome: totalLeaveIncome,
+    workIncome,
+    topupIncome,
+    totalIncome: grossIncome,
+    netIncome,
+    avgDpw,
+    leaveByChild,
+  };
+}
+
+function calculateTimeline() {
+  if (!state.children.length) return { months: [], consumed: {}, warnings: [] };
+
+  const dr = computeTimelineDateRange();
+  if (!dr) return { months: [], consumed: {}, warnings: [] };
+
+  const months = buildMonthRange(dr.min, dr.max);
+  const consumed = initConsumedFromChildren();
   /** Months with leave: per-parent count toward top-up eligibility (mutated while building monthResults). */
   const topupMonths = [{}, {}];
 
   const monthResults = [];
   for (const { year, month } of months) {
-    const mDays = daysInMonth(year, month);
-
-    const parentResults = [0, 1].map(pi => {
-      let totalLeaveDays = 0;
-      let totalLeaveIncome = 0;
-      const leaveByChild = {};
-
-      const childIds = getChildIdSet();
-      const derivedForYear = getDerivedForYear(year);
-
-      const vacSet = getVacationSetForParent(pi);
-      const prePreschoolWeekKeys = new Set();
-      const daysByChild = {};
-      let paidCalendarDays = 0;
-      for (let day = 1; day <= mDays; day++) {
-        const dateObj = new Date(year, month - 1, day);
-        const key = toYMD(dateObj);
-        if (vacSet.has(key)) {
-          paidCalendarDays += 1;
-          continue;
-        }
-        const assignment = resolveParentalAssignment(key, derivedForYear);
-        const p = assignment.slots[pi];
-        if (p && childIds.has(p.ci)) {
-          if (!daysByChild[p.ci]) daysByChild[p.ci] = 0;
-          daysByChild[p.ci] += 1;
-          const iw0 = isoWeekNumber(dateObj);
-          const ch = state.children.find(c => c.id === p.ci);
-          const ps = ch && ch.preschoolDate ? parseDate(ch.preschoolDate) : null;
-          if (!ps || dateObj < ps) prePreschoolWeekKeys.add(iw0.year + '|' + iw0.week);
-          if (!topupMonths[pi][p.ci]) topupMonths[pi][p.ci] = 0;
-          if (ps && dateObj >= ps) continue;
-        }
-        const iw = isoWeekNumber(dateObj);
-        const wkKey = iw.year + '|' + iw.week;
-        if (!prePreschoolWeekKeys.has(wkKey)) paidCalendarDays += 1;
-      }
-
-      const sjukRate = calcDailyRate(state.parents[pi].salary);
-      for (const ci in daysByChild) {
-        const daysNeeded = daysByChild[ci];
-        const pool = getSharedPoolRemaining(ci, consumed);
-        const sjukRemaining = pool[pi].sjuk;
-        const lagstaRemaining = pool[pi].lagsta;
-        const totalChildSjuk = consumed[ci][0].sjuk + consumed[ci][1].sjuk;
-        const lagstaUnlocked = totalChildSjuk >= FK.FIRST_SJUK_REQUIREMENT;
-
-        const sjukDays = Math.min(daysNeeded, sjukRemaining);
-        const lagstaDays = lagstaUnlocked
-          ? Math.min(daysNeeded - sjukDays, lagstaRemaining)
-          : 0;
-        const totalDays = sjukDays + lagstaDays;
-
-        totalLeaveDays += totalDays;
-        totalLeaveIncome += sjukDays * sjukRate + lagstaDays * FK.LAGSTA_DAILY;
-
-        if (!leaveByChild[ci]) leaveByChild[ci] = { sjuk: 0, lagsta: 0 };
-        leaveByChild[ci].sjuk += sjukDays;
-        leaveByChild[ci].lagsta += lagstaDays;
-
-        consumed[ci][pi].sjuk += sjukDays;
-        consumed[ci][pi].lagsta += lagstaDays;
-      }
-
-      for (const ci in leaveByChild) {
-        if (leaveByChild[ci].sjuk > 0 || leaveByChild[ci].lagsta > 0) {
-          if (!topupMonths[pi][ci]) topupMonths[pi][ci] = 0;
-          topupMonths[pi][ci]++;
-        }
-      }
-
-      const avgDpw = mDays > 0 ? totalLeaveDays / (mDays / 7) : 0;
-      const salary = state.parents[pi].salary;
-
-      const workFraction = mDays > 0
-        ? Math.max(0, Math.min(1, paidCalendarDays / mDays))
-        : 1;
-      const workIncome = workFraction * salary;
-
-      const leaveFrac = mDays > 0
-        ? Math.max(0, Math.min(1, (mDays - paidCalendarDays) / mDays))
-        : 0;
-      let topupIncome = 0;
-      for (const tu of state.parents[pi].topups) {
-        if (leaveByChild[tu.ci] && topupMonths[pi][tu.ci] <= tu.months) {
-          topupIncome += salary * (tu.pct / 100) * leaveFrac;
-        }
-      }
-
-      const grossIncome = totalLeaveIncome + workIncome + topupIncome;
-
-      const tabellNr = getTabellNr(state.parents[pi].kommun, state.parents[pi].forsamling, state.parents[pi].churchTax);
-      const table = tabellNr ? taxCache.tabeller[tabellNr] : null;
-
-      let netIncome = null;
-      if (table) {
-        const workGross = workIncome + topupIncome;
-        const taxOnWork = workGross > 0 ? (lookupTax(workGross, table, 'col1') || 0) : 0;
-        const taxOnFK = totalLeaveIncome > 0 ? (lookupTax(totalLeaveIncome, table, 'col1') || 0) : 0;
-        netIncome = grossIncome - taxOnWork - taxOnFK;
-      }
-
-      return {
-        leaveDays: totalLeaveDays,
-        leaveIncome: totalLeaveIncome,
-        workIncome,
-        topupIncome,
-        totalIncome: grossIncome,
-        netIncome,
-        avgDpw,
-        leaveByChild,
-      };
-    });
-
+    const parentResults = [0, 1].map(pi => computeParentMonth(pi, year, month, consumed, topupMonths));
     monthResults.push({ year, month, parents: parentResults });
   }
 
   const warnings = generateWarnings(consumed, monthResults);
-
   return { months: monthResults, consumed, warnings };
 }
 
@@ -1254,7 +1318,7 @@ function summaryParents() {
 function summaryDayPool() {
   if (!state.children.length) return 'Inga barn';
   return state.children.map(c => {
-    const u = c.usedDays || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const u = c.usedDays || freshUsedDays();
     const total = (u[0].sjuk || 0) + (u[0].lagsta || 0) + (u[1].sjuk || 0) + (u[1].lagsta || 0);
     return `${esc(c.name)}: ${total} använda`;
   }).join(', ');
@@ -1317,7 +1381,7 @@ function summaryDayBalance(consumed) {
   if (!state.children.length) return '—';
   let totalUsed = 0, totalPool = 0;
   for (const c of state.children) {
-    const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const cons = consumed[c.id] || freshUsedDays();
     const used = cons[0].sjuk + cons[0].lagsta + cons[1].sjuk + cons[1].lagsta;
     totalUsed += used;
     totalPool += FK.SJUK_DAYS_TOTAL + FK.LAGSTA_DAYS_TOTAL;
@@ -1330,7 +1394,7 @@ function summaryRemainingDays(consumed) {
   if (!children.length) return '—';
   let totalRem = 0;
   for (const c of children) {
-    const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const cons = consumed[c.id] || freshUsedDays();
     const sjukUsed = cons[0].sjuk + cons[1].sjuk;
     const lagstaUsed = cons[0].lagsta + cons[1].lagsta;
     totalRem += Math.max(0, FK.SJUK_DAYS_TOTAL - sjukUsed) + Math.max(0, FK.LAGSTA_DAYS_TOTAL - lagstaUsed);
@@ -1364,27 +1428,27 @@ function renderChildren() {
   return `
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold text-slate-900">Barn</h2>
-        <button onclick="actions.addChild()" class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white text-sm rounded-lg font-medium transition">+ Lägg till barn</button>
+        <button type="button" onclick="actions.addChild()" class="${btnPrimary()}">+ Lägg till barn</button>
       </div>
-      ${state.children.length === 0 ? '<p class="text-slate-400 text-sm italic">Inga barn tillagda. Lägg till ett barn för att börja planera.</p>' : ''}
+      ${state.children.length === 0 ? emptyMsg('Inga barn tillagda. Lägg till ett barn för att börja planera.') : ''}
       <div class="space-y-3">
         ${state.children.map(c => `
-          <div class="p-3 bg-amber-50 rounded-lg border border-amber-200 space-y-2">
+          <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
             <div class="flex items-center gap-3">
               <input type="text" value="${esc(c.name)}" placeholder="Namn"
                 onchange="actions.updateChild('${c.id}','name',this.value)"
-                class="flex-1 px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
+                class="flex-1 ${inputCls('sm')}" />
               <input type="date" value="${c.birthDate || ''}"
                 onchange="actions.updateChild('${c.id}','birthDate',this.value)"
-                class="px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
-              <button onclick="actions.removeChild('${c.id}')" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
+                class="${inputCls('sm')}" />
+              ${removeBtn(`actions.removeChild('${c.id}')`)}
             </div>
             <div class="flex flex-col gap-0.5">
               <div class="flex items-center gap-2">
                 <label class="text-xs text-slate-500 w-24 shrink-0">Förskolestart</label>
                 <input type="date" value="${c.preschoolDate || ''}"
                   onchange="actions.updateChild('${c.id}','preschoolDate',this.value)"
-                  class="px-2 py-1 border border-amber-300 rounded text-xs bg-white" />
+                  class="${inputCls('xs')}" />
               </div>
               <p class="text-[10px] text-slate-500 pl-24">Före detta datum: hela veckan utan lön vid FP. Från detta datum: bara FP-dagen själv utan lön (arbetsgivaren betalar övriga dagar).</p>
             </div>
@@ -1407,7 +1471,7 @@ function renderTaxFields(pi, p) {
       <div class="flex items-center gap-2">
         <label class="text-xs text-slate-500 w-28">Kommun</label>
         <select onchange="actions.updateParentTax(${pi},'kommun',this.value)"
-          class="flex-1 px-2 py-1 border rounded text-xs bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}">
+          class="flex-1 ${inputCls('xs')}">
           <option value="">Välj kommun…</option>
           ${kommunNames.map(k => `<option value="${esc(k)}" ${p.kommun === k ? 'selected' : ''}>${esc(k)}</option>`).join('')}
         </select>
@@ -1415,7 +1479,7 @@ function renderTaxFields(pi, p) {
       ${p.kommun ? `<div class="flex items-center gap-2">
         <label class="text-xs text-slate-500 w-28">Församling</label>
         <select onchange="actions.updateParentTax(${pi},'forsamling',this.value)"
-          class="flex-1 px-2 py-1 border rounded text-xs bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}">
+          class="flex-1 ${inputCls('xs')}">
           <option value="">Välj…</option>
           ${forsamlingar.map(f => `<option value="${esc(f)}" ${p.forsamling === f ? 'selected' : ''}>${esc(f)}</option>`).join('')}
         </select>
@@ -1432,7 +1496,8 @@ function renderTaxFields(pi, p) {
       ${tabellNr ? `<div class="text-xs text-slate-500">
         Skattetabell: <strong>${tabellNr}</strong>${netExample !== null ? ` · Nettolön: <strong>${formatKr(netExample)} kr</strong>` : ''}${!table ? ' <span class="text-amber-500">(läser in…)</span>' : ''}
       </div>` : ''}
-      ${!kommuner ? '<div class="text-xs text-slate-400 italic">Läser in skattedata…</div>' : ''}
+      ${taxKommunerError ? `<div class="text-xs text-red-600">${esc(taxKommunerError)} <button type="button" class="underline font-medium" onclick="actions.retryTaxKommuner()">Försök igen</button></div>` : ''}
+      ${!kommuner && !taxKommunerError ? '<div class="text-xs text-slate-400 italic">Läser in skattedata…</div>' : ''}
     </div>
   `;
 }
@@ -1442,45 +1507,45 @@ function renderParents() {
       <h2 class="text-lg font-semibold text-slate-900 mb-4">Föräldrar</h2>
       <div class="space-y-4">
         ${state.parents.map((p, pi) => `
-          <div class="p-4 rounded-lg border-2 parent-${pi}" style="background: ${pi === 0 ? '#eff6ff' : '#fdf2f8'}; border-color: ${pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
+          <div class="p-4 rounded-lg border-2 parent-${pi}" style="background: ${pc(pi, 'bg')}; border-color: ${pc(pi, 'border')}">
             <div class="flex items-center gap-3 mb-3">
-              <div class="w-3 h-3 rounded-full" style="background: ${pi === 0 ? '#2563eb' : '#be185d'}"></div>
+              <div class="w-3 h-3 rounded-full" style="background: ${pc(pi, 'main')}"></div>
               <input type="text" value="${esc(p.name)}" placeholder="Namn"
                 onchange="actions.updateParent(${pi},'name',this.value)"
-                class="flex-1 px-2 py-1 border rounded text-sm font-medium bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}" />
+                class="flex-1 ${inputCls('sm', 'font-medium')}" />
             </div>
             <div class="flex items-center gap-2 mb-3">
               <label class="text-xs text-slate-500 w-28">Månadslön</label>
               <input type="number" value="${p.salary}" step="1000" min="0"
                 onchange="actions.updateParent(${pi},'salary',Number(this.value))"
-                class="flex-1 px-2 py-1 border rounded text-sm bg-white" style="border-color: ${pi === 0 ? '#93c5fd' : '#f9a8d4'}" />
+                class="flex-1 ${inputCls('sm')}" />
               <span class="text-xs text-slate-400">kr/mån</span>
             </div>
             <div class="flex items-center gap-2 mb-2">
               <span class="text-xs text-slate-500">FK dagsersättning (sjukpenning): <strong>${formatKr(calcDailyRate(p.salary))} kr</strong></span>
             </div>
             ${renderTaxFields(pi, p)}
-            <div class="mt-3 border-t pt-3" style="border-color: ${pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
+            <div class="mt-3 border-t pt-3" style="border-color: ${pc(pi, 'border')}">
               <div class="flex items-center justify-between mb-2">
                 <span class="text-xs font-medium text-slate-600">Arbetsgivartillägg</span>
-                <button onclick="actions.addTopup(${pi})" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Lägg till</button>
+                <button type="button" onclick="actions.addTopup(${pi})" class="${btnPrimary()} text-xs py-1 px-2.5">+ Lägg till</button>
               </div>
               ${p.topups.map((tu, ti) => `
                 <div class="flex items-center gap-2 mb-1.5 text-xs">
                   <select onchange="actions.updateTopup(${pi},${ti},'ci',this.value)"
-                    class="px-1 py-0.5 border border-slate-300 rounded bg-white text-xs">
+                    class="${inputCls('compact')}">
                     <option value="">Barn…</option>
-                    ${state.children.map(c => `<option value="${c.id}" ${tu.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+                    ${childSelectOptions(tu.ci)}
                   </select>
                   <input type="number" value="${tu.pct}" min="0" max="100" step="1"
                     onchange="actions.updateTopup(${pi},${ti},'pct',Number(this.value))"
-                    class="w-14 px-1 py-0.5 border border-slate-300 rounded bg-white text-xs" />
+                    class="w-14 ${inputCls('compact')}" />
                   <span class="text-slate-400">% i</span>
                   <input type="number" value="${tu.months}" min="1" max="36" step="1"
                     onchange="actions.updateTopup(${pi},${ti},'months',Number(this.value))"
-                    class="w-12 px-1 py-0.5 border border-slate-300 rounded bg-white text-xs" />
+                    class="w-12 ${inputCls('compact')}" />
                   <span class="text-slate-400">mån</span>
-                  <button onclick="actions.removeTopup(${pi},${ti})" class="text-red-400 hover:text-red-600 font-bold">&times;</button>
+                  ${removeBtn(`actions.removeTopup(${pi},${ti})`, 'text-base')}
                 </div>
               `).join('')}
             </div>
@@ -1503,21 +1568,21 @@ function renderChildSetup() {
               <div class="text-xs font-medium text-slate-600 mb-1.5">Tidigare använda dagar</div>
               <div class="grid grid-cols-2 gap-3">
                 ${[0, 1].map(pi => {
-                  const ud = (c.usedDays || [{sjuk:0,lagsta:0},{sjuk:0,lagsta:0}])[pi];
+                  const ud = (c.usedDays || freshUsedDays())[pi];
                   return `
-                  <div class="p-2 rounded space-y-1.5" style="background: ${pi === 0 ? '#eff6ff' : '#fdf2f8'}">
-                    <div class="text-xs font-medium" style="color:${pi === 0 ? '#2563eb' : '#be185d'}">${esc(state.parents[pi].name)}</div>
+                  <div class="p-2 rounded space-y-1.5" style="background: ${pc(pi, 'bg')}">
+                    <div class="text-xs font-medium" style="color:${pc(pi, 'main')}">${esc(state.parents[pi].name)}</div>
                     <div class="flex items-center gap-1">
                       <label class="text-xs text-slate-500 w-10">Sjuk</label>
                       <input type="number" value="${ud.sjuk || 0}" min="0" max="${FK.SJUK_DAYS_TOTAL - FK.RESERVED_SJUK}" step="1"
                         onchange="actions.updateUsedDays('${c.id}',${pi},'sjuk',Number(this.value))"
-                        class="w-full px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white" />
+                        class="${inputCls('wide')}" />
                     </div>
                     <div class="flex items-center gap-1">
                       <label class="text-xs text-slate-500 w-10">Lägsta</label>
                       <input type="number" value="${ud.lagsta || 0}" min="0" max="${FK.LAGSTA_DAYS_TOTAL}" step="1"
                         onchange="actions.updateUsedDays('${c.id}',${pi},'lagsta',Number(this.value))"
-                        class="w-full px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white" />
+                        class="${inputCls('wide')}" />
                     </div>
                   </div>`;
                 }).join('')}
@@ -1534,44 +1599,44 @@ function renderRules() {
   return `
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-lg font-semibold text-slate-900">Ledighetsregler</h2>
-        <button onclick="actions.addRule()" class="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-sm rounded-lg font-medium transition" ${state.children.length === 0 ? 'disabled title="Lägg till barn först"' : ''}>+ Lägg till regel</button>
+        <button type="button" onclick="actions.addRule()" class="${btnPrimary()}" ${state.children.length === 0 ? 'disabled title="Lägg till barn först"' : ''}>+ Lägg till regel</button>
       </div>
       <p class="text-xs text-slate-400 mb-3">Ange ledighetsperioder: vem tar hur många dagar per vecka, för vilket barn. Totalt antal lediga dagar = <strong>ISO-veckor som berör perioden</strong> × dagar/vecka (fördelas sedan per kalenderdag). Sjukpenning först, sedan lägstanivå.</p>
-      ${rules.length === 0 ? '<p class="text-slate-400 text-sm italic">Inga ledighetsregler ännu.</p>' : ''}
+      ${rules.length === 0 ? emptyMsg('Inga ledighetsregler ännu.') : ''}
       <div class="space-y-3">
         ${rules.map((r, ri) => `
-          <div class="p-3 rounded-lg border-2" style="background: ${r.pi === 0 ? '#eff6ff' : '#fdf2f8'}; border-color: ${r.pi === 0 ? '#bfdbfe' : '#fbcfe8'}">
+          <div class="p-3 rounded-lg border-2" style="background: ${pc(r.pi, 'bg')}; border-color: ${pc(r.pi, 'border')}">
             <div class="flex items-center justify-between mb-2">
               <div class="flex items-center gap-2">
                 <select onchange="actions.updateRule(${ri},'pi',Number(this.value))"
-                  class="px-2 py-1 border border-slate-300 rounded text-sm bg-white font-medium">
+                  class="${inputCls('sm', 'font-medium')}">
                   ${state.parents.map((p, i) => `<option value="${i}" ${r.pi === i ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
                 </select>
                 <select onchange="actions.updateRule(${ri},'ci',this.value)"
-                  class="px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                  class="${inputCls('sm')}">
                   <option value="">Barn…</option>
-                  ${state.children.map(c => `<option value="${c.id}" ${r.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+                  ${childSelectOptions(r.ci)}
                 </select>
               </div>
-              <button onclick="actions.removeRule(${ri})" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
+              ${removeBtn(`actions.removeRule(${ri})`)}
             </div>
             <div class="grid grid-cols-3 gap-2">
               <div>
                 <label class="text-xs text-slate-500">Från</label>
                 <input type="date" value="${r.start || ''}"
                   onchange="actions.updateRule(${ri},'start',this.value)"
-                  class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white" />
+                  class="w-full ${inputCls('sm')}" />
               </div>
               <div>
                 <label class="text-xs text-slate-500">Till</label>
                 <input type="date" value="${r.end || ''}"
                   onchange="actions.updateRule(${ri},'end',this.value)"
-                  class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white" />
+                  class="w-full ${inputCls('sm')}" />
               </div>
               <div>
                 <label class="text-xs text-slate-500">Dagar/vecka</label>
                 <select onchange="actions.updateRule(${ri},'dpw',Number(this.value))"
-                  class="w-full px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+                  class="w-full ${inputCls('sm')}">
                   ${[1,2,3,4,5,6,7].map(d => `<option value="${d}" ${r.dpw === d ? 'selected' : ''}>${d}</option>`).join('')}
                 </select>
               </div>
@@ -1594,11 +1659,11 @@ function renderYearCalendarControls() {
       <p class="text-xs text-slate-500">Höger panelen visar <strong>två kalendrar per år</strong> (en per förälder, bredvid varandra). FP från <strong>ledighetsreglerna</strong> (första <em>avrundade dpw</em> dagar per vecka, inkl. helger); du kan justera med måla/klick och <em>off</em>. <strong>Semester</strong> maskar bort lön men räknas inte som FP. Välj typ, interaktion och <strong>aktiv förälder</strong> när du målar.</p>
       <div class="flex flex-wrap items-center gap-2">
         <label class="text-xs text-slate-500">År från</label>
-        <select onchange="actions.setCalendarYearRange('start', Number(this.value))" class="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+        <select onchange="actions.setCalendarYearRange('start', Number(this.value))" class="${inputCls('xs')}">
           ${yearOpts.map(yy => `<option value="${yy}" ${yy === start ? 'selected' : ''}>${yy}</option>`).join('')}
         </select>
         <label class="text-xs text-slate-500">till</label>
-        <select onchange="actions.setCalendarYearRange('end', Number(this.value))" class="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+        <select onchange="actions.setCalendarYearRange('end', Number(this.value))" class="${inputCls('xs')}">
           ${yearOpts.map(yy => `<option value="${yy}" ${yy === end ? 'selected' : ''}>${yy}</option>`).join('')}
         </select>
       </div>
@@ -1620,8 +1685,8 @@ function renderYearCalendarControls() {
       </div>
       ${modePar ? (state.children.length ? `<div class="flex flex-wrap items-center gap-2">
         <label class="text-xs text-slate-500">Barn (manuell FP-dag)</label>
-        <select onchange="actions.setCalendarPaintChild(this.value)" class="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
-          ${state.children.map(c => `<option value="${esc(c.id)}" ${calendarSelectedChildId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        <select onchange="actions.setCalendarPaintChild(this.value)" class="${inputCls('xs')}">
+          ${childSelectOptions(calendarSelectedChildId)}
         </select>
       </div>` : '<p class="text-xs text-amber-700">Lägg till barn för att manuellt lägga FP-dagar.</p>') : ''}
       <div class="flex flex-wrap gap-2">
@@ -1653,13 +1718,13 @@ function renderYearCalendarMain(timeline) {
       <div class="shrink-0 flex flex-col gap-1">
         <div class="text-[10px] text-slate-600 font-medium">${y}</div>
         <div class="flex flex-wrap gap-4 items-start">
-          <div class="year-cal-wrap shrink-0 border border-slate-200 rounded-lg bg-white p-2 parent-0" style="border-color:#bfdbfe;background:#fafcff">
+          <div class="year-cal-wrap shrink-0 border border-slate-200 rounded-lg bg-white p-2 parent-0" style="border-color:${pc(0, 'border')};background:${pc(0, 'bg')}">
             <div class="text-[9px] font-semibold text-slate-800 mb-1 truncate max-w-[200px]" title="${esc(state.parents[0].name)}">${esc(state.parents[0].name)}</div>
             <div class="year-cal-grid" style="grid-template-columns: ${colTpl}; width: max-content;">
               ${grid0}
             </div>
           </div>
-          <div class="year-cal-wrap shrink-0 border border-slate-200 rounded-lg bg-white p-2 parent-1" style="border-color:#fbcfe8;background:#fffafb">
+          <div class="year-cal-wrap shrink-0 border border-slate-200 rounded-lg bg-white p-2 parent-1" style="border-color:${pc(1, 'border')};background:${pc(1, 'bg')}">
             <div class="text-[9px] font-semibold text-slate-800 mb-1 truncate max-w-[200px]" title="${esc(state.parents[1].name)}">${esc(state.parents[1].name)}</div>
             <div class="year-cal-grid" style="grid-template-columns: ${colTpl}; width: max-content;">
               ${grid1}
@@ -1721,23 +1786,23 @@ function renderYearlyPlans() {
   return `
     <div class="flex items-center justify-between mb-2">
       <h3 class="text-sm font-semibold text-slate-700">Dagar per år (kvarvarande dagar)</h3>
-      <button onclick="actions.addYearlyPlan()" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Lägg till</button>
+      <button type="button" onclick="actions.addYearlyPlan()" class="${btnPrimary()} text-xs py-1 px-2.5">+ Lägg till</button>
     </div>
-    ${(!state.yearlyPlans || state.yearlyPlans.length === 0) ? '<p class="text-xs text-slate-400 italic mb-1">Inga fasta planer. Dagar fördelas jämnt.</p>' : ''}
+    ${(!state.yearlyPlans || state.yearlyPlans.length === 0) ? emptyMsg('Inga fasta planer. Dagar fördelas jämnt.', 'xs') : ''}
     ${(state.yearlyPlans || []).map((yp, yi) => `
       <div class="flex items-center gap-2 mb-1.5 text-xs">
         <select onchange="actions.updateYearlyPlan(${yi},'ci',this.value)"
-          class="px-1.5 py-1 border border-slate-300 rounded bg-white text-xs">
-          ${state.children.map(c => `<option value="${c.id}" ${yp.ci === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+          class="${inputCls('compact')}">
+          ${childSelectOptions(yp.ci)}
         </select>
         <input type="number" value="${yp.year}" min="2024" max="2050" step="1"
           onchange="actions.updateYearlyPlan(${yi},'year',this.value)"
-          class="w-16 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
+          class="w-16 ${inputCls('compact')}" />
         <input type="number" value="${yp.days}" min="1" max="200" step="1"
           onchange="actions.updateYearlyPlan(${yi},'days',this.value)"
-          class="w-14 px-1.5 py-1 border border-slate-300 rounded bg-white text-xs" />
+          class="w-14 ${inputCls('compact')}" />
         <span class="text-slate-400">dagar</span>
-        <button onclick="actions.removeYearlyPlan(${yi})" class="text-red-400 hover:text-red-600 font-bold">&times;</button>
+        ${removeBtn(`actions.removeYearlyPlan(${yi})`, 'text-base')}
       </div>
     `).join('')}
   `;
@@ -1745,19 +1810,20 @@ function renderYearlyPlans() {
 
 function renderResults(timeline) {
   const yearCal = collapsible('year-calendar-view', 'Årskalender', summaryYearCalendar(timeline), renderYearCalendarMain(timeline));
+  const warningsBlock = (tw) => collapsible('warnings', 'Varningar', summaryWarnings(tw || []), (tw && tw.length ? renderWarnings(tw) : '') || '<p class="text-slate-400 text-sm">Inga varningar.</p>');
   if (!timeline || !timeline.months.length) {
-    return yearCal + collapsible('warnings', 'Varningar', '0 varningar', '<div class="text-center py-8 text-slate-400">Lägg till barn och ledighetsregler (eller måla FP i årskalendern) för att se resultat.</div>');
+    return warningsBlock(timeline && timeline.warnings) + yearCal + collapsible('empty-results', 'Resultat', '—', '<div class="text-center py-8 text-slate-400">Lägg till barn och ledighetsregler (eller måla FP i årskalendern) för att se resultat.</div>');
   }
   const warningsHtml = renderWarnings(timeline.warnings);
   const dayBalanceHtml = renderDayBalance(timeline.consumed);
   const remainingHtml = renderRemainingDays(timeline.consumed, timeline.months);
   const timelineHtml = renderTimeline(timeline.months);
   return [
+    collapsible('warnings', 'Varningar', summaryWarnings(timeline.warnings), warningsHtml || '<p class="text-slate-400 text-sm">Inga varningar.</p>'),
     yearCal,
     collapsible('day-balance', 'Dagsaldo', summaryDayBalance(timeline.consumed), dayBalanceHtml),
     collapsible('monthly-overview', 'Månadsöversikt', summaryMonthlyOverview(timeline.months), timelineHtml),
     collapsible('remaining-days', 'Kvarvarande dagar', summaryRemainingDays(timeline.consumed), remainingHtml || '<p class="text-slate-400 text-sm">Inga kvarvarande dagar att visa.</p>'),
-    collapsible('warnings', 'Varningar', summaryWarnings(timeline.warnings), warningsHtml || '<p class="text-slate-400 text-sm">Inga varningar.</p>'),
   ].join('');
 }
 
@@ -1791,7 +1857,7 @@ function renderDayBalance(consumed) {
       <h2 class="text-lg font-semibold text-slate-900 mb-4">Dagsaldo</h2>
       <div class="space-y-4">
         ${state.children.map(c => {
-          const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+          const cons = consumed[c.id] || freshUsedDays();
           const totalSjuk = cons[0].sjuk + cons[1].sjuk;
           const totalLagsta = cons[0].lagsta + cons[1].lagsta;
           const totalUsed = totalSjuk + totalLagsta;
@@ -1825,13 +1891,13 @@ function renderDayBalance(consumed) {
                   <span>Sjukpenning (${FK.SJUK_DAYS_TOTAL} totalt, ${FK.RESERVED_SJUK} reserverade/förälder)</span>
                   <span>${Math.round(totalSjuk)} / ${FK.SJUK_DAYS_TOTAL} använt (${Math.round(FK.SJUK_DAYS_TOTAL - totalSjuk)} kvar)</span>
                 </div>
-                <div class="h-3 bg-slate-200 rounded-full overflow-hidden flex">
-                  <div class="bar h-full" style="width:${cons[0].sjuk / FK.SJUK_DAYS_TOTAL * 100}%;background:#2563eb" title="${esc(state.parents[0].name)}: ${Math.round(cons[0].sjuk)}"></div>
-                  <div class="bar h-full" style="width:${cons[1].sjuk / FK.SJUK_DAYS_TOTAL * 100}%;background:#be185d" title="${esc(state.parents[1].name)}: ${Math.round(cons[1].sjuk)}"></div>
-                </div>
+                ${barSegmentsHtml([
+                  { pct: cons[0].sjuk / FK.SJUK_DAYS_TOTAL * 100, color: pc(0, 'main'), title: state.parents[0].name + ': ' + Math.round(cons[0].sjuk) },
+                  { pct: cons[1].sjuk / FK.SJUK_DAYS_TOTAL * 100, color: pc(1, 'main'), title: state.parents[1].name + ': ' + Math.round(cons[1].sjuk) },
+                ])}
                 <div class="flex justify-between text-xs mt-0.5">
-                  <span style="color:#2563eb">${esc(state.parents[0].name)}: ${Math.round(cons[0].sjuk)}</span>
-                  <span style="color:#be185d">${esc(state.parents[1].name)}: ${Math.round(cons[1].sjuk)}</span>
+                  <span style="color:${pc(0, 'main')}">${esc(state.parents[0].name)}: ${Math.round(cons[0].sjuk)}</span>
+                  <span style="color:${pc(1, 'main')}">${esc(state.parents[1].name)}: ${Math.round(cons[1].sjuk)}</span>
                 </div>
               </div>
               <div class="mb-2">
@@ -1839,13 +1905,13 @@ function renderDayBalance(consumed) {
                   <span>Lägstanivå (${FK.LAGSTA_DAYS_TOTAL} totalt, delad)</span>
                   <span>${Math.round(totalLagsta)} / ${FK.LAGSTA_DAYS_TOTAL} använt (${Math.round(FK.LAGSTA_DAYS_TOTAL - totalLagsta)} kvar)</span>
                 </div>
-                <div class="h-3 bg-slate-200 rounded-full overflow-hidden flex">
-                  <div class="bar h-full" style="width:${cons[0].lagsta / FK.LAGSTA_DAYS_TOTAL * 100}%;background:#60a5fa" title="${esc(state.parents[0].name)}: ${Math.round(cons[0].lagsta)}"></div>
-                  <div class="bar h-full" style="width:${cons[1].lagsta / FK.LAGSTA_DAYS_TOTAL * 100}%;background:#f472b6" title="${esc(state.parents[1].name)}: ${Math.round(cons[1].lagsta)}"></div>
-                </div>
+                ${barSegmentsHtml([
+                  { pct: cons[0].lagsta / FK.LAGSTA_DAYS_TOTAL * 100, color: pc(0, 'bar'), title: state.parents[0].name + ': ' + Math.round(cons[0].lagsta) },
+                  { pct: cons[1].lagsta / FK.LAGSTA_DAYS_TOTAL * 100, color: pc(1, 'bar'), title: state.parents[1].name + ': ' + Math.round(cons[1].lagsta) },
+                ])}
                 <div class="flex justify-between text-xs mt-0.5">
-                  <span style="color:#60a5fa">${esc(state.parents[0].name)}: ${Math.round(cons[0].lagsta)}</span>
-                  <span style="color:#f472b6">${esc(state.parents[1].name)}: ${Math.round(cons[1].lagsta)}</span>
+                  <span style="color:${pc(0, 'bar')}">${esc(state.parents[0].name)}: ${Math.round(cons[0].lagsta)}</span>
+                  <span style="color:${pc(1, 'bar')}">${esc(state.parents[1].name)}: ${Math.round(cons[1].lagsta)}</span>
                 </div>
               </div>
               <div class="text-xs text-slate-500 text-center">
@@ -1859,10 +1925,7 @@ function renderDayBalance(consumed) {
   `;
 }
 
-function renderRemainingDays(consumed, months) {
-  const children = state.children.filter(c => c.birthDate);
-  if (!children.length) return '';
-
+function buildRemainingCalendarByYear(months) {
   const calendarByYear = {};
   for (const m of (months || [])) {
     const y = m.year;
@@ -1883,15 +1946,33 @@ function renderRemainingDays(consumed, months) {
       }
     }
   }
+  return calendarByYear;
+}
 
-  const now = new Date();
-  const avgSjukRate = (calcDailyRate(state.parents[0].salary) + calcDailyRate(state.parents[1].salary)) / 2;
+function remainingDaysSegmentCount(segStart, segEnd) {
+  return Math.max(0, Math.round((segEnd - segStart) / DAY_MS) + 1);
+}
+
+function roundPreservingRemainingSum(amounts) {
+  const target = Math.round(amounts.reduce((a, b) => a + b, 0));
+  const fl = amounts.map(a => Math.floor(a));
+  let sum = fl.reduce((a, b) => a + b, 0);
+  let remainder = target - sum;
+  const indices = amounts.map((_, i) => i).sort((a, b) => (amounts[b] - fl[b]) - (amounts[a] - fl[a]));
+  for (let i = 0; i < remainder; i++) fl[indices[i]] += 1;
+  return fl;
+}
+
+/** @returns {null | { pools, totalRemSjuk, totalRemLagsta, totalRem }} */
+function buildRemainingPools(consumed) {
+  const children = state.children.filter(c => c.birthDate);
+  if (!children.length) return null;
 
   const pools = [];
   let totalRemSjuk = 0, totalRemLagsta = 0;
 
   for (const c of children) {
-    const cons = consumed[c.id] || [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
+    const cons = consumed[c.id] || freshUsedDays();
     const sjukUsed = cons[0].sjuk + cons[1].sjuk;
     const lagstaUsed = cons[0].lagsta + cons[1].lagsta;
     const remSjuk = Math.max(0, FK.SJUK_DAYS_TOTAL - sjukUsed);
@@ -1917,36 +1998,12 @@ function renderRemainingDays(consumed, months) {
   }
 
   const totalRem = totalRemSjuk + totalRemLagsta;
-  if (totalRem <= 0) return '';
-
+  if (totalRem <= 0) return null;
   pools.sort((a, b) => a.deadline - b.deadline);
+  return { pools, totalRemSjuk, totalRemLagsta, totalRem };
+}
 
-  let planStart = now;
-  for (const r of state.rules || []) {
-    if (r.end) {
-      const d = parseDate(r.end);
-      if (d && d > planStart) planStart = d;
-    }
-  }
-
-  const latestDeadline = pools.length ? pools[pools.length - 1].deadline : planStart;
-  const plannedYears = (state.yearlyPlans || []).map(yp => yp.year).filter(y => y && Number.isFinite(y));
-  const firstYear = Math.min(planStart.getFullYear(), ...plannedYears, latestDeadline.getFullYear());
-  const lastYear = Math.max(latestDeadline.getFullYear(), ...plannedYears, planStart.getFullYear());
-
-  function daysInSegment(segStart, segEnd) {
-    return Math.max(0, Math.round((segEnd - segStart) / DAY_MS) + 1);
-  }
-  function roundPreservingSum(amounts) {
-    const target = Math.round(amounts.reduce((a, b) => a + b, 0));
-    const fl = amounts.map(a => Math.floor(a));
-    let sum = fl.reduce((a, b) => a + b, 0);
-    let remainder = target - sum;
-    const indices = amounts.map((_, i) => i).sort((a, b) => (amounts[b] - fl[b]) - (amounts[a] - fl[a]));
-    for (let i = 0; i < remainder; i++) fl[indices[i]] += 1;
-    return fl;
-  }
-
+function buildRemainingMonthSlots(planStart, firstYear, lastYear) {
   const monthSlots = [];
   for (let y = firstYear; y <= lastYear; y++) {
     const startMonth = (y === firstYear) ? planStart.getMonth() : 0;
@@ -1956,7 +2013,10 @@ function renderRemainingDays(consumed, months) {
       monthSlots.push({ year: y, month: m, monthStart, monthEnd, days: 0, sources: [], fixed: false });
     }
   }
+  return monthSlots;
+}
 
+function mergeYearlyPlansIntoMonthSlots(monthSlots) {
   const plansByYear = {};
   let allPlannedTotal = 0;
   for (const yp of (state.yearlyPlans || [])) {
@@ -1983,7 +2043,10 @@ function renderRemainingDays(consumed, months) {
   for (const slot of monthSlots) {
     if (plansByYear[slot.year]) slot.fixed = true;
   }
+  return { plansByYear, allPlannedTotal };
+}
 
+function deductPlannedFromRemainingPools(pools, allPlannedTotal) {
   let plannedLeft = allPlannedTotal;
   for (const pool of pools) {
     if (plannedLeft <= 0) break;
@@ -1991,7 +2054,9 @@ function renderRemainingDays(consumed, months) {
     pool.days -= deduct;
     plannedLeft -= deduct;
   }
+}
 
+function distributeRemainingPoolsToMonthSlots(pools, monthSlots, planStart, firstYear, lastYear) {
   const latestBefore4Deadline = pools
     .filter(p => p.label === 'före 4 år')
     .reduce((max, p) => (p.deadline > max ? p.deadline : max), new Date(0));
@@ -2008,7 +2073,7 @@ function renderRemainingDays(consumed, months) {
     }).map(slot => {
       const segStart = slot.monthStart > poolStart ? slot.monthStart : poolStart;
       const segEnd = slot.monthEnd < poolEnd ? slot.monthEnd : poolEnd;
-      const segmentDays = daysInSegment(segStart, segEnd);
+      const segmentDays = remainingDaysSegmentCount(segStart, segEnd);
       return { slot, segmentDays };
     }).filter(x => x.segmentDays > 0);
 
@@ -2045,14 +2110,14 @@ function renderRemainingDays(consumed, months) {
       const sumTarget = perYearAmounts.reduce((a, b) => a + b, 0);
       if (sumTarget <= 0) perYearAmounts = fullYears.map(() => fullYearTotal / fullYears.length);
       else if (Math.abs(sumTarget - fullYearTotal) > 0.5) perYearAmounts = perYearAmounts.map(a => a * fullYearTotal / sumTarget);
-      const perYearRounded = roundPreservingSum(perYearAmounts);
+      const perYearRounded = roundPreservingRemainingSum(perYearAmounts);
       for (let i = 0; i < fullYears.length; i++) {
         const y = fullYears[i];
         const yearTotal = Math.max(0, Math.min(perYearRounded[i], fullYearTotal));
         const monthsInYear = fullSlots.filter(x => x.slot.year === y);
         if (monthsInYear.length === 0) continue;
         const perMonth = monthsInYear.map(() => yearTotal / monthsInYear.length);
-        const perMonthRounded = roundPreservingSum(perMonth);
+        const perMonthRounded = roundPreservingRemainingSum(perMonth);
         for (let j = 0; j < monthsInYear.length; j++) {
           const give = perMonthRounded[j];
           if (give > 0) {
@@ -2065,7 +2130,7 @@ function renderRemainingDays(consumed, months) {
 
     if (partialSlots.length > 0 && partialTotal > 0 && partialWeight > 0) {
       const amounts = partialSlots.map(x => partialTotal * x.segmentDays / partialWeight);
-      const rounded = roundPreservingSum(amounts);
+      const rounded = roundPreservingRemainingSum(amounts);
       for (let i = 0; i < partialSlots.length; i++) {
         const give = rounded[i];
         if (give > 0) {
@@ -2075,7 +2140,9 @@ function renderRemainingDays(consumed, months) {
       }
     }
   }
+}
 
+function foldRemainingMonthSlotsToYearSlots(monthSlots, firstYear, lastYear) {
   const yearSlots = [];
   for (let y = firstYear; y <= lastYear; y++) {
     const monthsInYear = monthSlots.filter(s => s.year === y);
@@ -2084,7 +2151,10 @@ function renderRemainingDays(consumed, months) {
     const fixed = monthsInYear.some(m => m.fixed);
     yearSlots.push({ year: y, sjuk: 0, lagsta: 0, total, sources, fixed });
   }
+  return yearSlots;
+}
 
+function assignSjukLagstaToYearSlots(yearSlots, totalRemSjuk) {
   let globalSjukLeft = totalRemSjuk;
   for (const slot of yearSlots) {
     const sjukForSlot = Math.min(globalSjukLeft, slot.total);
@@ -2092,13 +2162,48 @@ function renderRemainingDays(consumed, months) {
     slot.lagsta = slot.total - sjukForSlot;
     globalSjukLeft -= sjukForSlot;
   }
+}
 
-  const totalValue = Math.round(totalRemSjuk * avgSjukRate + totalRemLagsta * FK.LAGSTA_DAILY);
-  const yearSlotsWithRules = yearSlots.map(s => {
+function mergeCalendarRulesIntoYearSlots(yearSlots, calendarByYear) {
+  return yearSlots.map(s => {
     const r = calendarByYear[s.year] || { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
     return { ...s, rulesTotal: r.total, rulesSjuk: r.sjuk, rulesLagsta: r.lagsta, rulesByChild: r.byChild };
   });
+}
+
+function renderRemainingDays(consumed, months) {
+  const poolData = buildRemainingPools(consumed);
+  if (!poolData) return '';
+  const { pools, totalRemSjuk, totalRemLagsta, totalRem } = poolData;
+
+  const calendarByYear = buildRemainingCalendarByYear(months);
+  const avgSjukRate = (calcDailyRate(state.parents[0].salary) + calcDailyRate(state.parents[1].salary)) / 2;
+
+  const now = new Date();
+  let planStart = now;
+  for (const r of state.rules || []) {
+    if (r.end) {
+      const d = parseDate(r.end);
+      if (d && d > planStart) planStart = d;
+    }
+  }
+
+  const latestDeadline = pools.length ? pools[pools.length - 1].deadline : planStart;
+  const plannedYears = (state.yearlyPlans || []).map(yp => yp.year).filter(y => y && Number.isFinite(y));
+  const firstYear = Math.min(planStart.getFullYear(), ...plannedYears, latestDeadline.getFullYear());
+  const lastYear = Math.max(latestDeadline.getFullYear(), ...plannedYears, planStart.getFullYear());
+
+  const monthSlots = buildRemainingMonthSlots(planStart, firstYear, lastYear);
+  const { allPlannedTotal } = mergeYearlyPlansIntoMonthSlots(monthSlots);
+  deductPlannedFromRemainingPools(pools, allPlannedTotal);
+  distributeRemainingPoolsToMonthSlots(pools, monthSlots, planStart, firstYear, lastYear);
+
+  const yearSlots = foldRemainingMonthSlotsToYearSlots(monthSlots, firstYear, lastYear);
+  assignSjukLagstaToYearSlots(yearSlots, totalRemSjuk);
+  const yearSlotsWithRules = mergeCalendarRulesIntoYearSlots(yearSlots, calendarByYear);
   const maxDays = Math.max(...yearSlotsWithRules.map(s => s.total + s.rulesTotal), 1);
+
+  const totalValue = Math.round(totalRemSjuk * avgSjukRate + totalRemLagsta * FK.LAGSTA_DAILY);
 
   return `
       <h2 class="text-lg font-semibold text-slate-900 mb-1">Kvarvarande dagar</h2>
@@ -2158,7 +2263,7 @@ function renderRemainingDays(consumed, months) {
                 <span class="w-10 text-sm font-medium flex-shrink-0 ${s.fixed ? 'text-violet-700' : 'text-slate-700'}">${s.year}</span>
                 <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
                   <div class="bar h-full rounded-full" style="width:${rulesPct}%;background:#94a3b8" title="Från regler/kalender"></div>
-                  <div class="bar h-full rounded-full" style="width:${sjukPct}%;background:#2563eb" title="Föreslagen sjukpenning"></div>
+                  <div class="bar h-full rounded-full" style="width:${sjukPct}%;background:${pc(0, 'main')}" title="Föreslagen sjukpenning"></div>
                   <div class="bar h-full rounded-full" style="width:${lagstaPct}%;background:#f59e0b" title="Föreslagen lägstanivå"></div>
                 </div>
                 <span class="w-24 text-sm font-bold text-right flex-shrink-0" title="${Math.round(s.rulesTotal)} från regler/kalender, ${Math.round(s.total)} förslag">${Math.round(totalDays)} dagar</span>
@@ -2220,8 +2325,8 @@ function renderTimeline(months) {
       <div class="flex items-center gap-2 py-1 px-2 mb-1 text-xs text-slate-400">
         <span class="flex-shrink-0" style="width:5.5rem"></span>
         <span class="flex-1"></span>
-        <span class="w-16 text-right flex-shrink-0" style="color:#2563eb">${esc(p0Name)}</span>
-        <span class="w-16 text-right flex-shrink-0" style="color:#be185d">${esc(p1Name)}</span>
+        <span class="w-16 text-right flex-shrink-0" style="color:${pc(0, 'main')}">${esc(p0Name)}</span>
+        <span class="w-16 text-right flex-shrink-0" style="color:${pc(1, 'main')}">${esc(p1Name)}</span>
         <span class="w-16 text-right flex-shrink-0 font-medium">${anyNet ? 'Netto' : 'Totalt'}</span>
         <span class="w-10 text-right flex-shrink-0">%</span>
         <span class="w-4"></span>
@@ -2256,20 +2361,20 @@ function renderTimeline(months) {
                 <span class="text-sm font-medium text-slate-700 flex-shrink-0" style="width:5.5rem">${m.year} ${monthName(m.month).slice(0,3)}</span>
                 <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
                   ${isActive ? `
-                    <div class="bar h-full" style="width:${(hasNet ? p0.netIncome : p0.totalIncome) / barBase * 100}%;background:#2563eb"></div>
-                    <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:#be185d"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p0.netIncome : p0.totalIncome) / barBase * 100}%;background:${pc(0, 'main')}"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:${pc(1, 'main')}"></div>
                   ` : `
-                    <div class="bar h-full" style="width:${(hasNet ? p0.netIncome : p0.totalIncome) / barBase * 100}%;background:#93c5fd"></div>
-                    <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:#f9a8d4"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p0.netIncome : p0.totalIncome) / barBase * 100}%;background:${pc(0, 'light')}"></div>
+                    <div class="bar h-full" style="width:${(hasNet ? p1.netIncome : p1.totalIncome) / barBase * 100}%;background:${pc(1, 'light')}"></div>
                   `}
                 </div>
                 ${hasNet ? `
-                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#2563eb">${formatKr(p0.netIncome)}</span>
-                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#be185d">${formatKr(p1.netIncome)}</span>
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:${pc(0, 'main')}">${formatKr(p0.netIncome)}</span>
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:${pc(1, 'main')}">${formatKr(p1.netIncome)}</span>
                   <span class="w-16 text-sm font-bold text-right flex-shrink-0">${formatKr(familyNet)}</span>
                 ` : `
-                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#2563eb">${formatKr(p0.totalIncome)}</span>
-                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:#be185d">${formatKr(p1.totalIncome)}</span>
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:${pc(0, 'main')}">${formatKr(p0.totalIncome)}</span>
+                  <span class="w-16 text-xs text-right flex-shrink-0" style="color:${pc(1, 'main')}">${formatKr(p1.totalIncome)}</span>
                   <span class="w-16 text-sm font-bold text-right flex-shrink-0">${formatKr(familyTotal)}</span>
                 `}
                 <span class="w-10 text-xs ${pctColor} text-right flex-shrink-0">${pct}%</span>
@@ -2277,8 +2382,8 @@ function renderTimeline(months) {
               </div>
               ${isActive ? `<div class="tl-detail hidden px-2 pb-2 pt-0.5" style="margin-left:5.5rem" data-detail="${mi}">
                 <div class="flex flex-col gap-0.5 pl-2 border-l-2 border-slate-200">
-                  <div>${parentDetail(p0, p0Name, '#2563eb')}</div>
-                  <div>${parentDetail(p1, p1Name, '#be185d')}</div>
+                  <div>${parentDetail(p0, p0Name, pc(0, 'main'))}</div>
+                  <div>${parentDetail(p1, p1Name, pc(1, 'main'))}</div>
                 </div>
               </div>` : ''}
             </div>
@@ -2329,8 +2434,8 @@ function renderLeaveSummary(months, anyNet, fullNetSalary) {
       <h3 class="text-sm font-semibold text-slate-700 mb-3">Inkomsteffekt av föräldraledighet (${totalMonths} månader)</h3>
       <div class="grid grid-cols-2 gap-3">
         ${summaries.map((s, pi) => {
-          const color = pi === 0 ? '#2563eb' : '#be185d';
-          const bg = pi === 0 ? '#eff6ff' : '#fdf2f8';
+          const color = pc(pi, 'main');
+          const bg = pc(pi, 'bg');
           const pct = s.hasNet ? s.pctRetainedNet : s.pctRetainedGross;
           const lost = s.hasNet ? s.lostNet : s.lostGross;
           return `
@@ -2365,115 +2470,114 @@ function renderLeaveSummary(months, anyNet, fullNetSalary) {
 
 // --- ACTIONS ---
 
+function mutate(fn) {
+  fn();
+  saveState();
+  renderAll();
+}
+
 window.actions = {
   addChild() {
-    const id = nextId();
-    state.children.push({ id, name: 'Barn ' + (state.children.length + 1), birthDate: '', preschoolDate: '', usedDays: [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }] });
-    saveState();
-    renderAll();
+    mutate(() => {
+      const id = nextId();
+      state.children.push({ id, name: 'Barn ' + (state.children.length + 1), birthDate: '', preschoolDate: '', usedDays: freshUsedDays() });
+    });
   },
   removeChild(id) {
-    state.children = state.children.filter(c => c.id !== id);
-    if (state.rules) state.rules = state.rules.filter(r => r.ci !== id);
-    for (const p of state.parents) {
-      p.topups = p.topups.filter(t => t.ci !== id);
-    }
-    if (state.calendarParentalOverrides && typeof state.calendarParentalOverrides === 'object') {
-      const next = {};
-      for (const [k, v] of Object.entries(state.calendarParentalOverrides)) {
-        if (v && typeof v === 'object' && ('0' in v || '1' in v)) {
-          const nv = { ...v };
-          if (nv[0] === id) nv[0] = null;
-          if (nv[1] === id) nv[1] = null;
-          if (nv[0] == null && nv[1] == null) continue;
-          next[k] = nv;
-          continue;
-        }
-        next[k] = v;
+    if (!window.confirm('Ta bort barnet och rensa kopplade regler/tillägg?')) return;
+    mutate(() => {
+      state.children = state.children.filter(c => c.id !== id);
+      if (state.rules) state.rules = state.rules.filter(r => r.ci !== id);
+      for (const p of state.parents) {
+        p.topups = p.topups.filter(t => t.ci !== id);
       }
-      state.calendarParentalOverrides = next;
-    }
-    if (calendarSelectedChildId === id) calendarSelectedChildId = state.children[0] ? state.children[0].id : '';
-    saveState();
-    renderAll();
+      if (state.calendarParentalOverrides && typeof state.calendarParentalOverrides === 'object') {
+        const next = {};
+        for (const [k, v] of Object.entries(state.calendarParentalOverrides)) {
+          if (v && typeof v === 'object' && ('0' in v || '1' in v)) {
+            const nv = { ...v };
+            if (nv[0] === id) nv[0] = null;
+            if (nv[1] === id) nv[1] = null;
+            if (nv[0] == null && nv[1] == null) continue;
+            next[k] = nv;
+            continue;
+          }
+          next[k] = v;
+        }
+        state.calendarParentalOverrides = next;
+      }
+      if (calendarSelectedChildId === id) calendarSelectedChildId = state.children[0] ? state.children[0].id : '';
+    });
   },
   updateChild(id, field, value) {
-    const c = state.children.find(c => c.id === id);
-    if (c) c[field] = value;
-    saveState();
-    renderAll();
+    mutate(() => {
+      const c = state.children.find(c => c.id === id);
+      if (c) c[field] = value;
+    });
   },
   updateParent(pi, field, value) {
-    state.parents[pi][field] = value;
-    saveState();
-    renderAll();
+    mutate(() => { state.parents[pi][field] = value; });
   },
   updateParentTax(pi, field, value) {
+    mutate(() => {
+      const p = state.parents[pi];
+      p[field] = value;
+      if (field === 'kommun') p.forsamling = '';
+    });
     const p = state.parents[pi];
-    p[field] = value;
-    if (field === 'kommun') {
-      p.forsamling = '';
-    }
-    saveState();
-    renderAll();
     const tabellNr = getTabellNr(p.kommun, p.forsamling, p.churchTax);
     if (tabellNr) ensureTabellLoaded(tabellNr);
   },
+  retryTaxKommuner() {
+    taxKommunerError = null;
+    ensureKommunerLoaded();
+  },
   addTopup(pi) {
-    state.parents[pi].topups.push({ ci: '', pct: 10, months: 6 });
-    saveState();
-    renderAll();
+    mutate(() => { state.parents[pi].topups.push({ ci: '', pct: 10, months: 6 }); });
   },
   removeTopup(pi, ti) {
-    state.parents[pi].topups.splice(ti, 1);
-    saveState();
-    renderAll();
+    mutate(() => { state.parents[pi].topups.splice(ti, 1); });
   },
   updateTopup(pi, ti, field, value) {
-    state.parents[pi].topups[ti][field] = value;
-    saveState();
-    renderAll();
+    mutate(() => { state.parents[pi].topups[ti][field] = value; });
   },
   updateUsedDays(childId, pi, level, value) {
     const c = state.children.find(c => c.id === childId);
     if (!c) return;
-    if (!c.usedDays) c.usedDays = [{ sjuk: 0, lagsta: 0 }, { sjuk: 0, lagsta: 0 }];
-    c.usedDays[pi][level] = Math.max(0, Math.round(value));
-    saveState();
-    renderAll();
+    mutate(() => {
+      if (!c.usedDays) c.usedDays = freshUsedDays();
+      c.usedDays[pi][level] = Math.max(0, Math.round(value));
+    });
   },
   addRule() {
-    if (!state.rules) state.rules = [];
-    const firstChild = state.children[0];
-    let defaultStart = '';
-    let defaultEnd = '';
-    if (firstChild && firstChild.birthDate) {
-      defaultStart = firstChild.birthDate;
-      const end = addMonths(firstChild.birthDate, 6);
-      if (end) defaultEnd = end.toISOString().slice(0, 10);
-    }
-    state.rules.push({
-      id: nextId(),
-      pi: 0,
-      ci: firstChild ? firstChild.id : '',
-      start: defaultStart,
-      end: defaultEnd,
-      dpw: 7,
+    mutate(() => {
+      if (!state.rules) state.rules = [];
+      const firstChild = state.children[0];
+      let defaultStart = '';
+      let defaultEnd = '';
+      if (firstChild && firstChild.birthDate) {
+        defaultStart = firstChild.birthDate;
+        const end = addMonths(firstChild.birthDate, 6);
+        if (end) defaultEnd = end.toISOString().slice(0, 10);
+      }
+      state.rules.push({
+        id: nextId(),
+        pi: 0,
+        ci: firstChild ? firstChild.id : '',
+        start: defaultStart,
+        end: defaultEnd,
+        dpw: 7,
+      });
     });
-    saveState();
-    renderAll();
   },
   removeRule(ri) {
     if (!state.rules) return;
-    state.rules.splice(ri, 1);
-    saveState();
-    renderAll();
+    if (!window.confirm('Ta bort denna ledighetsregel?')) return;
+    mutate(() => { state.rules.splice(ri, 1); });
   },
   updateRule(ri, field, value) {
     if (!state.rules || !state.rules[ri]) return;
-    state.rules[ri][field] = value;
-    saveState();
-    renderAll();
+    mutate(() => { state.rules[ri][field] = value; });
   },
   toggleMonth(mi) {
     const detail = document.querySelector('[data-detail="' + mi + '"]');
@@ -2482,37 +2586,34 @@ window.actions = {
     if (arrow) arrow.classList.toggle('open');
   },
   addYearlyPlan() {
-    state.yearlyPlans.push({ id: nextId(), ci: state.children.length ? state.children[0].id : '', year: new Date().getFullYear() + 1, days: 10 });
-    saveState();
-    renderAll();
+    mutate(() => {
+      state.yearlyPlans.push({ id: nextId(), ci: state.children.length ? state.children[0].id : '', year: new Date().getFullYear() + 1, days: 10 });
+    });
   },
   removeYearlyPlan(idx) {
-    state.yearlyPlans.splice(idx, 1);
-    saveState();
-    renderAll();
+    if (!window.confirm('Ta bort denna årsplan?')) return;
+    mutate(() => { state.yearlyPlans.splice(idx, 1); });
   },
   updateYearlyPlan(idx, field, value) {
-    state.yearlyPlans[idx][field] = field === 'days' || field === 'year' ? Number(value) : value;
-    saveState();
-    renderAll();
+    mutate(() => { state.yearlyPlans[idx][field] = field === 'days' || field === 'year' ? Number(value) : value; });
   },
   setCalendarYear(y) {
-    state.calendarYear = y;
-    state.calendarYearStart = y;
-    state.calendarYearEnd = y;
-    saveState();
-    renderAll();
+    mutate(() => {
+      state.calendarYear = y;
+      state.calendarYearStart = y;
+      state.calendarYearEnd = y;
+    });
   },
   setCalendarYearRange(bound, y) {
-    if (bound === 'start') state.calendarYearStart = y;
-    else state.calendarYearEnd = y;
-    if ((state.calendarYearEnd || y) < (state.calendarYearStart || y)) {
-      if (bound === 'start') state.calendarYearEnd = state.calendarYearStart;
-      else state.calendarYearStart = state.calendarYearEnd;
-    }
-    state.calendarYear = state.calendarYearStart;
-    saveState();
-    renderAll();
+    mutate(() => {
+      if (bound === 'start') state.calendarYearStart = y;
+      else state.calendarYearEnd = y;
+      if ((state.calendarYearEnd || y) < (state.calendarYearStart || y)) {
+        if (bound === 'start') state.calendarYearEnd = state.calendarYearStart;
+        else state.calendarYearStart = state.calendarYearEnd;
+      }
+      state.calendarYear = state.calendarYearStart;
+    });
   },
   setCalendarPaintMode(mode) {
     calendarPaint.mode = mode;
@@ -2533,9 +2634,7 @@ window.actions = {
   resetCalendarParentalOverrides() {
     const ok = window.confirm('Detta tar bort alla manuella föräldra-justeringar i Årskalendern. Vill du fortsätta?');
     if (!ok) return;
-    state.calendarParentalOverrides = {};
-    saveState();
-    renderAll();
+    mutate(() => { state.calendarParentalOverrides = {}; });
   },
   calendarCellDown(ev, dateKey) {
     if (ev.button !== 0) return;
@@ -2576,36 +2675,36 @@ window.actions = {
     scheduleCalendarRender();
   },
   cycleParentalOverride(dateKey) {
-    const d = parseDate(dateKey);
-    const y = d ? d.getFullYear() : (state.calendarYear || new Date().getFullYear());
-    const derived = getDerivedForYear(y);
-    const childIds = getChildIdSet();
-    const der = derived[dateKey] || {};
-    const hasDer = !!(derivedCiForParent(der, 0, childIds) || derivedCiForParent(der, 1, childIds));
-    const ovr = (state.calendarParentalOverrides || {})[dateKey];
-    const ci = calendarSelectedChildId || (state.children[0] && state.children[0].id);
-    const pi = calendarPaint.pi;
-    if (!state.calendarParentalOverrides || typeof state.calendarParentalOverrides !== 'object') state.calendarParentalOverrides = {};
-    if (ovr === undefined) {
-      if (hasDer) state.calendarParentalOverrides[dateKey] = 'off';
-      else if (ci) {
-        if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
-        const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
-        slots[pi] = { pi, ci };
-        writeParentalOverrideFromSlots(dateKey, derived, slots);
+    mutate(() => {
+      const d = parseDate(dateKey);
+      const y = d ? d.getFullYear() : (state.calendarYear || new Date().getFullYear());
+      const derived = getDerivedForYear(y);
+      const childIds = getChildIdSet();
+      const der = derived[dateKey] || {};
+      const hasDer = !!(derivedCiForParent(der, 0, childIds) || derivedCiForParent(der, 1, childIds));
+      const ovr = (state.calendarParentalOverrides || {})[dateKey];
+      const ci = calendarSelectedChildId || (state.children[0] && state.children[0].id);
+      const pi = calendarPaint.pi;
+      if (!state.calendarParentalOverrides || typeof state.calendarParentalOverrides !== 'object') state.calendarParentalOverrides = {};
+      if (ovr === undefined) {
+        if (hasDer) state.calendarParentalOverrides[dateKey] = 'off';
+        else if (ci) {
+          if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
+          const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
+          slots[pi] = { pi, ci };
+          writeParentalOverrideFromSlots(dateKey, derived, slots);
+        }
+      } else if (ovr === 'off') {
+        if (ci) {
+          if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
+          const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
+          slots[pi] = { pi, ci };
+          writeParentalOverrideFromSlots(dateKey, derived, slots);
+        }
+      } else if (typeof ovr === 'object') {
+        delete state.calendarParentalOverrides[dateKey];
       }
-    } else if (ovr === 'off') {
-      if (ci) {
-        if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
-        const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
-        slots[pi] = { pi, ci };
-        writeParentalOverrideFromSlots(dateKey, derived, slots);
-      }
-    } else if (typeof ovr === 'object') {
-      delete state.calendarParentalOverrides[dateKey];
-    }
-    saveState();
-    renderAll();
+    });
   },
 };
 
