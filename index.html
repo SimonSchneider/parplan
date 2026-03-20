@@ -912,7 +912,7 @@ function renderResults(timeline) {
   }
   const warningsHtml = renderWarnings(timeline.warnings);
   const dayBalanceHtml = renderDayBalance(timeline.consumed);
-  const remainingHtml = renderRemainingDays(timeline.consumed);
+  const remainingHtml = renderRemainingDays(timeline.consumed, timeline.months);
   const timelineHtml = renderTimeline(timeline.months);
   return [
     collapsible('warnings', 'Warnings', summaryWarnings(timeline.warnings), warningsHtml || '<p class="text-slate-400 text-sm">No warnings.</p>'),
@@ -1022,9 +1022,30 @@ function renderDayBalance(consumed) {
   `;
 }
 
-function renderRemainingDays(consumed) {
+function renderRemainingDays(consumed, months) {
   const children = state.children.filter(c => c.birthDate);
   if (!children.length) return '';
+
+  const rulesByYear = {};
+  for (const m of (months || [])) {
+    const y = m.year;
+    if (!rulesByYear[y]) rulesByYear[y] = { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
+    for (const pi of [0, 1]) {
+      const lbc = m.parents[pi].leaveByChild || {};
+      for (const ci in lbc) {
+        const child = state.children.find(c => c.id === ci);
+        const name = child ? child.name : ci;
+        if (!rulesByYear[y].byChild[name]) rulesByYear[y].byChild[name] = { total: 0, sjuk: 0, lagsta: 0 };
+        const d = lbc[ci].sjuk + lbc[ci].lagsta;
+        rulesByYear[y].total += d;
+        rulesByYear[y].sjuk += lbc[ci].sjuk;
+        rulesByYear[y].lagsta += lbc[ci].lagsta;
+        rulesByYear[y].byChild[name].total += d;
+        rulesByYear[y].byChild[name].sjuk += lbc[ci].sjuk;
+        rulesByYear[y].byChild[name].lagsta += lbc[ci].lagsta;
+      }
+    }
+  }
 
   const now = new Date();
   const avgSjukRate = (calcDailyRate(state.parents[0].salary) + calcDailyRate(state.parents[1].salary)) / 2;
@@ -1237,12 +1258,16 @@ function renderRemainingDays(consumed) {
   }
 
   const totalValue = Math.round(totalRemSjuk * avgSjukRate + totalRemLagsta * FK.LAGSTA_DAILY);
-  const maxDays = Math.max(...yearSlots.map(s => s.total), 1);
+  const yearSlotsWithRules = yearSlots.map(s => {
+    const r = rulesByYear[s.year] || { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
+    return { ...s, rulesTotal: r.total, rulesSjuk: r.sjuk, rulesLagsta: r.lagsta, rulesByChild: r.byChild };
+  });
+  const maxDays = Math.max(...yearSlotsWithRules.map(s => s.total + s.rulesTotal), 1);
 
   return `
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
       <h2 class="text-lg font-semibold text-slate-900 mb-1">Remaining Days</h2>
-      <p class="text-xs text-slate-400 mb-4">Joint pool across all children. Days balanced evenly over time (by month), respecting age 4 and age 12 deadlines. Results shown by year.</p>
+      <p class="text-xs text-slate-400 mb-4">Joint pool across all children. Days balanced evenly over time (by month), respecting age 4 and age 12 deadlines. Results shown by year. Includes leave rules and suggested remaining days.</p>
 
       <div class="flex flex-wrap gap-3 mb-4">
         <div class="flex-1 min-w-[100px] p-3 bg-blue-50 rounded-lg text-center">
@@ -1272,10 +1297,11 @@ function renderRemainingDays(consumed) {
         </div>
       ` : ''}
 
-      <h3 class="text-sm font-semibold text-slate-700 mb-2">Suggested yearly plan</h3>
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">Yearly plan (leave rules + suggested)</h3>
       <div class="space-y-1.5">
-        ${yearSlots.filter(s => s.total > 0).map(s => {
-          const weeks = (s.total / 5).toFixed(1);
+        ${yearSlotsWithRules.filter(s => s.total > 0 || s.rulesTotal > 0).map(s => {
+          const totalDays = s.total + s.rulesTotal;
+          const weeks = (totalDays / 5).toFixed(1);
           const byChildLabel = {};
           for (const src of s.sources) {
             const key = src.child + '|' + src.label;
@@ -1285,29 +1311,38 @@ function renderRemainingDays(consumed) {
           const sourceNote = Object.keys(byChildLabel).length > 0
             ? Object.values(byChildLabel).map(o => esc(o.child) + ' ' + o.label + ': ' + Math.round(o.days)).join(', ')
             : '';
+          const rulesNote = s.rulesTotal > 0
+            ? Object.entries(s.rulesByChild).map(([name, o]) => esc(name) + ': ' + Math.round(o.total)).join(', ')
+            : '';
+          const rulesPct = maxDays > 0 ? (s.rulesTotal / maxDays * 100) : 0;
+          const sjukPct = maxDays > 0 ? (s.sjuk / maxDays * 100) : 0;
+          const lagstaPct = maxDays > 0 ? (s.lagsta / maxDays * 100) : 0;
           return `
             <div class="rounded-lg hover:bg-slate-50 cursor-pointer ${s.fixed ? 'ring-1 ring-violet-300 bg-violet-50/50' : ''}" onclick="this.querySelector('.yr-detail').classList.toggle('hidden')">
               <div class="flex items-center gap-2 py-1.5 px-2">
                 <span class="w-10 text-sm font-medium flex-shrink-0 ${s.fixed ? 'text-violet-700' : 'text-slate-700'}">${s.year}</span>
                 <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
-                  <div class="bar h-full rounded-full" style="width:${s.sjuk / maxDays * 100}%;background:#2563eb"></div>
-                  <div class="bar h-full rounded-full" style="width:${s.lagsta / maxDays * 100}%;background:#f59e0b"></div>
+                  <div class="bar h-full rounded-full" style="width:${rulesPct}%;background:#94a3b8" title="Leave rules"></div>
+                  <div class="bar h-full rounded-full" style="width:${sjukPct}%;background:#2563eb" title="Suggested sjukpenning"></div>
+                  <div class="bar h-full rounded-full" style="width:${lagstaPct}%;background:#f59e0b" title="Suggested lägstanivå"></div>
                 </div>
-                <span class="w-20 text-sm font-bold text-right flex-shrink-0">${Math.round(s.total)} days</span>
+                <span class="w-24 text-sm font-bold text-right flex-shrink-0" title="${Math.round(s.rulesTotal)} from rules, ${Math.round(s.total)} suggested">${Math.round(totalDays)} days</span>
                 <span class="w-20 text-xs text-slate-500 text-right flex-shrink-0">${weeks} weeks</span>
                 <span class="w-4 text-xs text-slate-300 flex-shrink-0">&#9654;</span>
               </div>
               <div class="yr-detail hidden px-2 pb-2 pt-0.5 ml-10">
                 <div class="text-xs text-slate-500 pl-2 border-l-2 border-slate-200 space-y-0.5">
-                  ${s.sjuk > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>' + Math.round(s.sjuk) + ' sjukpenning days (' + formatKr(Math.round(s.sjuk * avgSjukRate)) + ' kr)</div>' : ''}
-                  ${s.lagsta > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>' + Math.round(s.lagsta) + ' lägstanivå days (' + formatKr(Math.round(s.lagsta * FK.LAGSTA_DAILY)) + ' kr)</div>' : ''}
-                  ${sourceNote ? '<div class="text-slate-400 mt-0.5">From: ' + sourceNote + '</div>' : ''}
+                  ${s.rulesTotal > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span><strong>Leave rules:</strong> ' + Math.round(s.rulesTotal) + ' days' + (rulesNote ? ' (' + rulesNote + ')' : '') + '</div>' : ''}
+                  ${s.sjuk > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>' + Math.round(s.sjuk) + ' sjukpenning suggested (' + formatKr(Math.round(s.sjuk * avgSjukRate)) + ' kr)</div>' : ''}
+                  ${s.lagsta > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>' + Math.round(s.lagsta) + ' lägstanivå suggested (' + formatKr(Math.round(s.lagsta * FK.LAGSTA_DAILY)) + ' kr)</div>' : ''}
+                  ${sourceNote ? '<div class="text-slate-400 mt-0.5"><strong>Suggested from:</strong> ' + sourceNote + '</div>' : ''}
                 </div>
               </div>
             </div>`;
         }).join('')}
       </div>
       <div class="flex items-center gap-4 mt-3 text-xs text-slate-400 justify-center">
+        <span><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span>Leave rules</span>
         <span><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>Sjukpenning</span>
         <span><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>Lägstanivå</span>
       </div>
