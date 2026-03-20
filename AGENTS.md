@@ -5,14 +5,14 @@
 ## 1. Project snapshot
 
 - **Name:** Föräldrapenning Planner (parplan)
-- **Purpose:** Plan parental leave for **two parents** in Sweden. Day pools, leave rules, income/tax estimates, and a **suggested yearly plan** for remaining days are based on **Försäkringskassan-style** limits encoded as constants (aligned with **2026** in code and tax dataset year).
+- **Purpose:** Plan parental leave for **two parents** in Sweden. Day pools, **ledighetsregler**, **årskalender** (manual FP adjustments + semester), income/tax estimates, and a **suggested yearly plan** for remaining days are based on **Försäkringskassan-style** limits encoded as constants (aligned with **2026** in code and tax dataset year).
 - **Codebase shape:** Almost everything is in a single file: [`index.html`](index.html) (Tailwind via CDN, LZ-String, inline JavaScript). **No build step.** Other tracked files: [`.gitignore`](.gitignore), [`README.md`](README.md) (short intro + link here), and this file.
 
 ## 2. State and persistence
 
 | Mechanism | What it stores |
 |-----------|----------------|
-| In-memory `state` | Children, parents (salary, tax fields, top-ups), leave rules, yearly plans, per-child used days, etc. Initialized from `defaultState()` and merged on load. |
+| In-memory `state` | Children, parents (salary, tax fields, top-ups), **leave rules** (`state.rules`), yearly plans, per-child used days, `calendarVacation`, `calendarParentalOverrides`, etc. Initialized from `defaultState()` and merged on load. |
 | URL hash + LZString | **Primary shareable state.** `saveState()` serializes `state` to JSON, compresses with LZString, writes `history.replaceState` with `#<compressed>`. `loadState()` reads `location.hash` and merges into `state`. |
 | `localStorage` `skv_*` | Cached Skatteverket kommuner/tabell data (TTL ~7 days). See `cacheGet` / `cacheSet` in `index.html`. |
 | `localStorage` `parplan_collapsedSections` | JSON array of collapsible section ids that are **closed**; restored on load so `<details>` state survives reloads. |
@@ -21,9 +21,9 @@
 
 ### Layout
 
-- Container: `max-w-[1920px]`, padded.
+- Container: `max-w-[1920px]`, padded; on `lg+` the page uses `h-screen` / `overflow-hidden` so only the panes scroll (no extra page scrollbar).
 - **Two panes:** `#left-pane` (config), `#right-pane` (results).
-- Responsive: `flex-col` below `lg`, `lg:flex-row` side-by-side; each pane scrolls (`overflow-y-auto`, max height tied to viewport).
+- Responsive: `flex-col` below `lg`, `lg:flex-row` side-by-side; each pane scrolls (`overflow-y-auto`, `flex-1 min-h-0`).
 
 ### Collapsible sections
 
@@ -35,30 +35,34 @@
 
 **Left (config), top to bottom:**
 
-1. Children — `renderChildren()`
-2. Parents — `renderParents()`
-3. Day Pool / Used — `renderChildSetup()`
-4. Leave Rules — `renderRules()`
-5. Planned Yearly Leave — `renderYearlyPlans()` (extracted from remaining-days; **not** embedded in suggested plan body)
+1. Barn — `renderChildren()`
+2. Föräldrar — `renderParents()`
+3. Dagpool / använda — `renderChildSetup()`
+4. Ledighetsregler — `renderRules()`
+5. Dagar per år (kvarvarande) — `renderYearlyPlans()` (extracted from remaining-days; **not** embedded in suggested plan body)
+6. Årskalender (semester) — controls in left pane; full grid in right pane
 
 **Right (results), top to bottom:**
 
-1. Warnings — `renderWarnings(timeline.warnings)`
-2. Day Balance — `renderDayBalance(timeline.consumed)`
-3. Monthly Overview — `renderTimeline(timeline.months)`
-4. Remaining Days — `renderRemainingDays(timeline.consumed, timeline.months)` (includes yearly plan UI)
+1. Årskalender — `renderYearCalendarMain(timeline)` (painted vacation + overrides; stats use the same `timeline` as the rest of the app)
+2. Dagsaldo — `renderDayBalance(timeline.consumed)`
+3. Månadsöversikt — `renderTimeline(timeline.months)`
+4. Kvarvarande dagar — `renderRemainingDays(timeline.consumed, timeline.months)` (includes yearly plan UI)
+5. Varningar — `renderWarnings(timeline.warnings)` (last)
 
 ### Render pipeline
 
-- `renderAll()`: sorts `state.rules` and `state.yearlyPlans`, runs **`calculateTimeline()` once**, sets `left-pane` / `right-pane` innerHTML from `renderConfig()` / `renderResults(timeline)`.
-- If there are no timeline months, results show a single empty-state collapsible instead of full panes.
+- `renderAll()`: sorts `state.rules` and `state.yearlyPlans`; **`beginRenderCycle()`** builds per-render caches (vacation sets, child ids, **`deriveParentalFromRules(year)`** via `derivedByYear`, holiday maps); runs **`calculateTimeline()` once**; sets `left-pane` / `right-pane` from **`renderConfig(timeline)`** / **`renderResults(timeline)`**; **`endRenderCycle()`** clears caches.
+- FP assignment: **`resolveParentalAssignment`** merges **`deriveParentalFromRules`** (from rules) with **`calendarParentalOverrides`**.
+- `computeYearCalendarStats(year, timeline)` takes the precomputed timeline (no second `calculateTimeline()` per year).
+- If there are no timeline months, results show Årskalender plus one collapsible with an empty-state message (no dagsaldo / månadsöversikt / kvarvarande / varningar blocks).
 
 ## 4. Core computation
 
-### `calculateTimeline()` (~line 279 in `index.html`)
+### `calculateTimeline()` (see `index.html`)
 
-- Builds a month range from leave rules (and related bounds).
-- For each month and each parent, applies rules → leave days and income; allocates **sjukpenning** vs **lägstanivå** per child using shared pool remaining (`getSharedPoolRemaining`, `consumed`).
+- Builds a month range from **children `birthDate`**, **`state.rules`** (start/end), **`calendarParentalOverrides`** date keys, and **`calendarVacation`** segments.
+- For each month and each parent, resolves FP per day from derived rules + overrides + vacation mask → leave days and income; allocates **sjukpenning** vs **lägstanivå** per child using shared pool remaining (`getSharedPoolRemaining`, `consumed`).
 - **Output:** `{ months, consumed, warnings }`
   - `consumed[childId][parentIndex]` → `{ sjuk, lagsta }` cumulative.
   - Each month: `{ year, month, parents: [ { leaveByChild, leaveDays, income fields, ... }, ... ] }` where `leaveByChild[childId] = { sjuk, lagsta }` for that parent that month.
@@ -80,17 +84,17 @@ Central limits (examples — see `index.html` for full list):
 
 ## 5. Yearly plan (Remaining Days section) — product rules
 
-This block is **not** the same as the monthly timeline: it suggests how to spread **remaining** parental benefit days across future years, then **merges** with days already implied by leave rules.
+This block is **not** the same as the monthly timeline: it suggests how to spread **remaining** parental benefit days across future years, then **merges** with days already implied by the **timeline** (rules + calendar overrides).
 
 ### Combined display: “Yearly plan (leave rules + suggested)”
 
-- **(A) Leave rules:** Per calendar year, sum `timeline.months` → both parents’ `leaveByChild` → total sjuk + lagsta per child (and aggregate `rulesTotal`, `rulesSjuk`, `rulesLagsta` for the year).
+- **(A) Timeline (regler/kalender):** Per calendar year, sum `timeline.months` → both parents’ `leaveByChild` → total sjuk + lagsta per child (and aggregate `rulesTotal`, `rulesSjuk`, `rulesLagsta` for the year in UI code).
 - **(B) Suggested:** Distribution of remaining pool days (planned yearly entries + “before age 4” + “before age 12” pools) into month slots, then rolled up by year.
-- **UI:** One row per year with **total = rules + suggested**; stacked bar — **slate** = rules, **blue** = suggested sjukpenning, **amber** = suggested lägstanivå. Expand for per-child rules text and “Suggested from: …”.
+- **UI:** One row per year with **total = (A) + (B)**; stacked bar — **slate** = timeline (rules/calendar), **blue** = suggested sjukpenning, **amber** = suggested lägstanivå. Expand for per-child breakdown and “Suggested from: …”.
 
 ### Suggested distribution (internal)
 
-- **Month-based internally, year-based in the UI:** `monthSlots` from `planStart` (latest rule end vs “now”) through the relevant year range (includes any year appearing in planned yearly leave).
+- **Month-based internally, year-based in the UI:** `monthSlots` from `planStart` (latest **`state.rules[].end`** vs “now”) through the relevant year range (includes any year appearing in planned yearly leave).
 - **Full vs partial years:** A calendar year is “full” for a pool if the entire year lies in `[poolStart, poolEnd]`. The pool’s days are split between full-year weight and partial-year weight; **full years** get a dedicated share, then **partial** months get the rest proportional to **segment day counts** (intersection of month with pool window).
 - **Evenness across years:** For the full-year portion of a pool, per-year amounts are chosen so **resulting year totals** (including days already placed from **earlier** pools in the same loop) are as balanced as possible — not simply `poolDays / numFullYears` ignoring other children’s earlier allocations.
 - **“Suggested from” line:** Multiple sources with the same `(child, label)` are **aggregated** (days summed) before display.
@@ -133,7 +137,7 @@ This block is **not** the same as the monthly timeline: it suggests how to sprea
 | Symbol | Role |
 |--------|------|
 | `state` | Application data |
-| `calculateTimeline` | Rules → months + consumed + warnings |
+| `calculateTimeline` | Rules + calendar overrides + vacation → months + consumed + warnings |
 | `renderRemainingDays(consumed, months)` | Pools, month distribution, yearly rows + rules merge |
 | `renderConfig` / `renderResults` | Left / right pane HTML |
 | `actions` | User event handlers (mutate state, save, renderAll) |
