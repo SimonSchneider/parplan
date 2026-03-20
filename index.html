@@ -10,7 +10,7 @@
     .parent-0 { --pc: #2563eb; --pbg: #eff6ff; --pborder: #bfdbfe; }
     .parent-1 { --pc: #be185d; --pbg: #fdf2f8; --pborder: #fbcfe8; }
     .bar { transition: width 0.3s ease; }
-    input[type="number"] { -moz-appearance: textfield; }
+    input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
     input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
     .tooltip { position: relative; }
     .tooltip .tip { display: none; position: absolute; z-index: 50; bottom: 100%; left: 50%; transform: translateX(-50%);
@@ -22,6 +22,19 @@
     .collapsible-section .collapsible-chevron { transition: transform 0.2s; }
     .collapsible-section[open] .collapsible-chevron { transform: rotate(180deg); }
     @media (max-width: 768px) { .desktop-only { display: none; } }
+    .year-cal-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .year-cal-grid { display: grid; grid-auto-rows: 14px; gap: 1px; user-select: none; }
+    .year-cal-wk { font-size: 9px; color: #64748b; text-align: right; padding-right: 4px; line-height: 14px; }
+    .year-cal-month { font-size: 9px; color: #0f172a; text-align: left; padding-left: 2px; line-height: 14px; font-weight: 500; }
+    .year-cal-hd { font-size: 8px; color: #94a3b8; text-align: center; line-height: 12px; }
+    .year-cal-cell { width: 10px; height: 12px; min-width: 10px; border-radius: 1px; cursor: pointer; box-sizing: border-box; }
+    .year-cal-cell.out { background: #f1f5f9; cursor: default; }
+    .year-cal-cell.weekend { opacity: 0.85; }
+    .year-cal-cell.month-start { outline: 1px solid #64748b; outline-offset: -1px; }
+    .pane-divider { width: 8px; cursor: col-resize; background: transparent; position: relative; }
+    .pane-divider::before { content: ''; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px; background: #e2e8f0; border-radius: 1px; }
+    .pane-divider.dragging::before { background: #94a3b8; }
+    @media (max-width: 1023px) { .pane-divider { display: none; } }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen">
@@ -39,9 +52,10 @@
     <p class="text-slate-500 text-sm">Plan parental leave for two parents. Rules based on Försäkringskassan 2026.</p>
   </header>
 
-  <div class="flex flex-col lg:flex-row gap-6 min-h-[calc(100vh-120px)]">
-    <div id="left-pane" class="flex-1 lg:flex-[0_0_48%] space-y-4 overflow-y-auto lg:max-h-[calc(100vh-120px)]"></div>
-    <div id="right-pane" class="flex-1 lg:flex-[0_0_48%] space-y-4 overflow-y-auto lg:max-h-[calc(100vh-120px)]"></div>
+  <div id="pane-row" class="flex flex-col lg:flex-row min-h-[calc(100vh-120px)]">
+    <div id="left-pane" class="flex-1 lg:flex-[0_0_38%] space-y-4 overflow-y-auto lg:max-h-[calc(100vh-120px)] pr-0 lg:pr-3"></div>
+    <div id="pane-divider" class="pane-divider"></div>
+    <div id="right-pane" class="flex-1 lg:flex-[0_0_62%] space-y-4 overflow-y-auto lg:max-h-[calc(100vh-120px)] pl-0 lg:pl-3"></div>
   </div>
 </div>
 
@@ -195,6 +209,11 @@ function defaultState() {
     ],
     rules: [],
     yearlyPlans: [],
+    calendarYear: new Date().getFullYear(),
+    calendarYearStart: new Date().getFullYear(),
+    calendarYearEnd: new Date().getFullYear(),
+    calendarVacation: [],
+    calendarParentalOverrides: {},
   };
 }
 
@@ -226,6 +245,14 @@ function loadState() {
       }));
       state.rules = state.rules || [];
       state.yearlyPlans = state.yearlyPlans || [];
+      state.calendarYear = Number(state.calendarYear) || defaultState().calendarYear;
+      state.calendarYearStart = Number(state.calendarYearStart) || state.calendarYear;
+      state.calendarYearEnd = Number(state.calendarYearEnd) || state.calendarYearStart;
+      if (state.calendarYearEnd < state.calendarYearStart) state.calendarYearEnd = state.calendarYearStart;
+      state.calendarVacation = state.calendarVacation || [];
+      state.calendarParentalOverrides = state.calendarParentalOverrides && typeof state.calendarParentalOverrides === 'object'
+        ? state.calendarParentalOverrides
+        : {};
     }
   } catch (e) { console.error('Load failed', e); }
 }
@@ -245,6 +272,561 @@ function parseDate(s) {
   const [y, m, d] = s.split('-').map(Number);
   return new Date(y, m - 1, d);
 }
+
+function toYMD(d) {
+  if (!d) return '';
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function addDaysDate(d, n) {
+  const x = new Date(d.getTime());
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+function easterSundayWestern(y) {
+  const a = y % 19;
+  const b = Math.floor(y / 100);
+  const c = y % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(y, month - 1, day);
+}
+
+function midsummerSaturday(y) {
+  for (let dom = 20; dom <= 26; dom++) {
+    const dt = new Date(y, 5, dom);
+    if (dt.getDay() === 6) return dt;
+  }
+  return new Date(y, 5, 20);
+}
+
+function allSaintsSaturday(y) {
+  const seq = [[9, 31], [10, 1], [10, 2], [10, 3], [10, 4], [10, 5], [10, 6]];
+  for (const [mo, dom] of seq) {
+    const dt = new Date(y, mo, dom);
+    if (dt.getDay() === 6) return dt;
+  }
+  return new Date(y, 10, 1);
+}
+
+function getSwedishPublicHolidaysList(y) {
+  const E = easterSundayWestern(y);
+  const midsommar = midsummerSaturday(y);
+  const out = [];
+  const push = (d, name) => out.push({ date: toYMD(d), name });
+  push(new Date(y, 0, 1), 'Nyårsdagen');
+  push(new Date(y, 11, 31), 'Nyårsafton');
+  push(new Date(y, 0, 6), 'Trettondedag jul');
+  push(addDaysDate(E, -2), 'Långfredagen');
+  push(addDaysDate(E, -1), 'Påskafton');
+  push(E, 'Påskdagen');
+  push(addDaysDate(E, 1), 'Annandag påsk');
+  push(new Date(y, 4, 1), 'Första maj');
+  push(addDaysDate(E, 39), 'Kristi himmelsfärdsdag');
+  push(addDaysDate(E, 49), 'Pingstdagen');
+  push(new Date(y, 5, 6), 'Nationaldagen');
+  push(addDaysDate(midsommar, -1), 'Midsommarafton');
+  push(midsommar, 'Midsommardagen');
+  push(allSaintsSaturday(y), 'Alla helgons dag');
+  push(new Date(y, 11, 24), 'Julafton');
+  push(new Date(y, 11, 25), 'Juldagen');
+  push(new Date(y, 11, 26), 'Annandag jul');
+  out.sort((a, b) => a.date.localeCompare(b.date));
+  const seen = new Set();
+  return out.filter(h => {
+    if (seen.has(h.date)) return false;
+    seen.add(h.date);
+    return true;
+  });
+}
+
+function swedishHolidayMapForYear(y) {
+  const m = {};
+  for (const h of getSwedishPublicHolidaysList(y)) m[h.date] = h.name;
+  return m;
+}
+
+function isWeekdayDate(d) {
+  const day = d.getDay();
+  return day >= 1 && day <= 5;
+}
+
+function buildCalendarWeekRows(year) {
+  const jan1 = new Date(year, 0, 1);
+  const dec31 = new Date(year, 11, 31);
+  const mondayOf = (d) => {
+    const x = new Date(d.getTime());
+    const dow = (x.getDay() + 6) % 7;
+    x.setDate(x.getDate() - dow);
+    return x;
+  };
+  let mon = mondayOf(jan1);
+  const rows = [];
+  while (true) {
+    const days = [];
+    let anyInYear = false;
+    for (let i = 0; i < 7; i++) {
+      const d = addDaysDate(mon, i);
+      if (d.getFullYear() === year) {
+        anyInYear = true;
+        days.push(toYMD(d));
+      } else {
+        days.push(null);
+      }
+    }
+    if (!anyInYear && mon > dec31) break;
+    if (anyInYear) {
+      const iso = isoWeekNumber(mon);
+      rows.push({ monday: toYMD(mon), weekNum: iso.week, isoYear: iso.year, days });
+    }
+    mon = addDaysDate(mon, 7);
+    if (mon > addDaysDate(dec31, 6)) break;
+  }
+  return rows;
+}
+
+function isoWeekNumber(anyDate) {
+  const d = new Date(anyDate.getTime());
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+  const week1 = new Date(d.getFullYear(), 0, 4);
+  return {
+    week: 1 + Math.round(((d.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7),
+    year: d.getFullYear(),
+  };
+}
+
+function countIsoWeeksTouchingRange(rStart, rEnd) {
+  const seen = new Set();
+  for (let d = new Date(rStart.getTime()); d <= rEnd; d.setDate(d.getDate() + 1)) {
+    const { week, year } = isoWeekNumber(d);
+    seen.add(year + '\0' + week);
+  }
+  return seen.size;
+}
+
+function ruleLeaveBudgetFromIsoWeeks(rule) {
+  const rStart = parseDate(rule.start);
+  const rEnd = parseDate(rule.end);
+  if (!rStart || !rEnd || rStart > rEnd) return null;
+  const spanDays = Math.round((rEnd - rStart) / 86400000) + 1;
+  if (spanDays <= 0) return null;
+  const weeks = countIsoWeeksTouchingRange(rStart, rEnd);
+  const dpw = Math.max(1, Math.min(7, Number(rule.dpw) || 0));
+  return { totalLeave: weeks * dpw, spanDays };
+}
+
+function deriveParentalFromRules(year) {
+  const byDate = {};
+  const childIds = new Set(state.children.map(c => c.id));
+
+  for (const rule of state.rules) {
+    if (!rule.start || !rule.end || rule.ci == null || !childIds.has(rule.ci)) continue;
+    const rStart = parseDate(rule.start);
+    const rEnd = parseDate(rule.end);
+    if (!rStart || !rEnd || rStart > rEnd) continue;
+    const pi = rule.pi;
+    const ci = rule.ci;
+    const dpw = Math.max(1, Math.min(7, Number(rule.dpw) || 0));
+    const nPerWeek = Math.min(7, Math.round(dpw));
+
+    let mon = mondayOfDate(rStart);
+    const lastWeekStart = mondayOfDate(rEnd);
+    while (mon <= lastWeekStart) {
+      const candidates = [];
+      for (let i = 0; i < 7; i++) {
+        const d = addDaysDate(mon, i);
+        if (d < rStart || d > rEnd) continue;
+        if (d.getFullYear() !== year) continue;
+        candidates.push(toYMD(d));
+      }
+      candidates.sort();
+      for (let k = 0; k < nPerWeek && k < candidates.length; k++) {
+        const key = candidates[k];
+        if (!byDate[key]) byDate[key] = {};
+        byDate[key][pi] = { ci };
+      }
+      mon = addDaysDate(mon, 7);
+    }
+  }
+  return byDate;
+}
+
+function mondayOfDate(d) {
+  const x = new Date(d.getTime());
+  const dow = (x.getDay() + 6) % 7;
+  x.setDate(x.getDate() - dow);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function vacationDateSetForParent(pi) {
+  const set = new Set();
+  for (const seg of state.calendarVacation || []) {
+    if (seg.pi !== pi || !seg.start || !seg.end) continue;
+    const a = parseDate(seg.start);
+    const b = parseDate(seg.end);
+    if (!a || !b || a > b) continue;
+    for (let d = new Date(a.getTime()); d <= b; d.setDate(d.getDate() + 1)) {
+      set.add(toYMD(d));
+    }
+  }
+  return set;
+}
+
+function mergeVacationRanges(pi) {
+  const ranges = (state.calendarVacation || []).filter(s => s.pi === pi && s.start && s.end).map(s => ({
+    start: parseDate(s.start),
+    end: parseDate(s.end),
+    id: s.id,
+  })).filter(x => x.start && x.end && x.start <= x.end).sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const r of ranges) {
+    if (!merged.length || r.start > addDaysDate(merged[merged.length - 1].end, 1)) {
+      merged.push({ start: new Date(r.start), end: new Date(r.end), id: r.id });
+    } else {
+      const last = merged[merged.length - 1];
+      if (r.end > last.end) last.end = new Date(r.end.getTime());
+    }
+  }
+  state.calendarVacation = (state.calendarVacation || []).filter(s => s.pi !== pi);
+  for (const m of merged) {
+    state.calendarVacation.push({ id: m.id || nextId(), pi, start: toYMD(m.start), end: toYMD(m.end) });
+  }
+}
+
+function toggleVacationDay(pi, dateKey) {
+  const set = vacationDateSetForParent(pi);
+  const dk = parseDate(dateKey);
+  if (!dk) return;
+  if (set.has(dateKey)) {
+    const next = [];
+    for (const seg of state.calendarVacation || []) {
+      if (seg.pi !== pi) {
+        next.push(seg);
+        continue;
+      }
+      const a = parseDate(seg.start);
+      const b = parseDate(seg.end);
+      if (!a || !b || a > b) continue;
+      if (dk < a || dk > b) {
+        next.push(seg);
+        continue;
+      }
+      if (toYMD(a) === dateKey && toYMD(b) === dateKey) continue;
+      if (dk > a) next.push({ id: seg.id, pi, start: toYMD(a), end: toYMD(addDaysDate(dk, -1)) });
+      if (dk < b) next.push({ id: nextId(), pi, start: toYMD(addDaysDate(dk, 1)), end: toYMD(b) });
+    }
+    state.calendarVacation = next;
+  } else {
+    if (!state.calendarVacation) state.calendarVacation = [];
+    state.calendarVacation.push({ id: nextId(), pi, start: dateKey, end: dateKey });
+    mergeVacationRanges(pi);
+  }
+}
+
+function childIdSet() {
+  return new Set(state.children.map(c => c.id));
+}
+
+function derivedCiForParent(der, pi, childIds) {
+  const x = der[pi];
+  return x && childIds.has(x.ci) ? x.ci : null;
+}
+
+function slotFromDerived(der, pi, childIds) {
+  const ci = derivedCiForParent(der, pi, childIds);
+  return ci ? { pi, ci } : null;
+}
+
+function isLegacyParentalOverride(ovr) {
+  return ovr && typeof ovr === 'object' && ovr.pi != null && ovr.ci != null && !('0' in ovr) && !('1' in ovr);
+}
+
+function isDualParentalOverride(ovr) {
+  return ovr && typeof ovr === 'object' && ('0' in ovr || '1' in ovr);
+}
+
+/** Effective FP slots before semester mask; `derivedParental[dateKey]` is `{ 0?: {ci}, 1?: {ci} }`. */
+function resolveParentalSlotsBeforeVacation(dateKey, derivedByDate) {
+  const childIds = childIdSet();
+  const der = derivedByDate[dateKey] || {};
+  const ovr = (state.calendarParentalOverrides || {})[dateKey];
+
+  if (ovr === 'off') return { 0: null, 1: null };
+
+  if (isLegacyParentalOverride(ovr)) {
+    const c = childIds.has(ovr.ci) ? ovr.ci : null;
+    return {
+      0: ovr.pi === 0 && c ? { pi: 0, ci: c } : null,
+      1: ovr.pi === 1 && c ? { pi: 1, ci: c } : null,
+    };
+  }
+
+  if (isDualParentalOverride(ovr)) {
+    return {
+      0: Object.prototype.hasOwnProperty.call(ovr, '0')
+        ? (ovr[0] && childIds.has(ovr[0]) ? { pi: 0, ci: ovr[0] } : null)
+        : slotFromDerived(der, 0, childIds),
+      1: Object.prototype.hasOwnProperty.call(ovr, '1')
+        ? (ovr[1] && childIds.has(ovr[1]) ? { pi: 1, ci: ovr[1] } : null)
+        : slotFromDerived(der, 1, childIds),
+    };
+  }
+
+  return {
+    0: slotFromDerived(der, 0, childIds),
+    1: slotFromDerived(der, 1, childIds),
+  };
+}
+
+function applyVacationMaskToSlots(slots, dateKey) {
+  return {
+    0: slots[0] && !vacationDateSetForParent(0).has(dateKey) ? slots[0] : null,
+    1: slots[1] && !vacationDateSetForParent(1).has(dateKey) ? slots[1] : null,
+  };
+}
+
+function resolveParentalSlots(dateKey, derivedByDate) {
+  const raw = resolveParentalSlotsBeforeVacation(dateKey, derivedByDate);
+  return applyVacationMaskToSlots(raw, dateKey);
+}
+
+function slotsMatchDerived(slots, der, childIds) {
+  const cid = s => (s ? s.ci : null);
+  return cid(slots[0]) === derivedCiForParent(der, 0, childIds) && cid(slots[1]) === derivedCiForParent(der, 1, childIds);
+}
+
+function writeParentalOverrideFromSlots(dateKey, derivedByDate, slots) {
+  if (!state.calendarParentalOverrides || typeof state.calendarParentalOverrides !== 'object')
+    state.calendarParentalOverrides = {};
+  const childIds = childIdSet();
+  const der = derivedByDate[dateKey] || {};
+
+  if (slotsMatchDerived(slots, der, childIds)) {
+    delete state.calendarParentalOverrides[dateKey];
+    return;
+  }
+
+  const cid0 = slots[0] ? slots[0].ci : null;
+  const cid1 = slots[1] ? slots[1].ci : null;
+  if (cid0 === null && cid1 === null) {
+    if (derivedCiForParent(der, 0, childIds) || derivedCiForParent(der, 1, childIds))
+      state.calendarParentalOverrides[dateKey] = 'off';
+    else delete state.calendarParentalOverrides[dateKey];
+    return;
+  }
+
+  state.calendarParentalOverrides[dateKey] = { 0: cid0, 1: cid1 };
+}
+
+function resolveParentalAssignment(dateKey, derivedParental) {
+  const ovr = (state.calendarParentalOverrides || {})[dateKey];
+  const slots = resolveParentalSlots(dateKey, derivedParental);
+  return { slots, parental: slots[0] || slots[1] || null, overrideRaw: ovr };
+}
+
+/** Semester wins over föräldraledighet for the same parent on the same day (state is cleaned on paint; this keeps display/timeline consistent if data is stale). */
+function clearParentalForParentOnDate(pi, dateKey) {
+  if (!state.calendarParentalOverrides || typeof state.calendarParentalOverrides !== 'object')
+    state.calendarParentalOverrides = {};
+  const d = parseDate(dateKey);
+  const y = d ? d.getFullYear() : (state.calendarYear || new Date().getFullYear());
+  const derived = deriveParentalFromRules(y);
+  const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
+  if (!slots[pi]) return;
+  writeParentalOverrideFromSlots(dateKey, derived, { ...slots, [pi]: null });
+}
+
+function resolveCalendarDay(year, dateKey, derivedParental) {
+  const holMap = swedishHolidayMapForYear(year);
+  const assignment = resolveParentalAssignment(dateKey, derivedParental);
+  const slots = assignment.slots;
+  const der = derivedParental[dateKey] || {};
+  const childIds = childIdSet();
+
+  const v0 = vacationDateSetForParent(0).has(dateKey);
+  const v1 = vacationDateSetForParent(1).has(dateKey);
+
+  return {
+    dateKey,
+    holidayName: holMap[dateKey] || null,
+    parentalSlots: slots,
+    vacationPi: v0 && v1 ? 'both' : v0 ? 0 : v1 ? 1 : null,
+    derivedParental: der,
+    derivedHasAny: !!(derivedCiForParent(der, 0, childIds) || derivedCiForParent(der, 1, childIds)),
+    overrideRaw: assignment.overrideRaw,
+  };
+}
+
+const YEAR_CAL_VACATION_RGBA = 'rgba(96, 165, 250, 0.82)';
+const YEAR_CAL_CHILD_FP_RGBA = [
+  'rgba(16, 185, 129, 0.8)',
+  'rgba(245, 158, 11, 0.82)',
+  'rgba(124, 58, 237, 0.78)',
+  'rgba(234, 88, 12, 0.82)',
+  'rgba(20, 184, 166, 0.8)',
+  'rgba(132, 204, 22, 0.82)',
+];
+
+function yearCalFpColorForChildId(cid) {
+  const i = state.children.findIndex(c => c.id === cid);
+  if (i < 0) return 'rgba(71, 85, 105, 0.78)';
+  return YEAR_CAL_CHILD_FP_RGBA[i % YEAR_CAL_CHILD_FP_RGBA.length];
+}
+
+function yearCalSolidLayer(color) {
+  return `linear-gradient(${color},${color})`;
+}
+
+function yearCalCellBackgroundLayersForParent(info, pi) {
+  const topFirst = [];
+  if (info.vacationPi === pi || info.vacationPi === 'both')
+    topFirst.push(yearCalSolidLayer(YEAR_CAL_VACATION_RGBA));
+  const slot = info.parentalSlots[pi];
+  if (slot) topFirst.push(yearCalSolidLayer(yearCalFpColorForChildId(slot.ci)));
+  return topFirst;
+}
+
+function buildYearCalGridHtmlForParent(y, derived, pi) {
+  const rows = buildCalendarWeekRows(y);
+  const hdrs = ['M', 'T', 'O', 'T', 'F', 'L', 'S'];
+  const cells = [];
+  cells.push(`<div class="year-cal-hd"></div>`);
+  cells.push(`<div class="year-cal-hd">Mon</div>`);
+  for (const h of hdrs) cells.push(`<div class="year-cal-hd">${h}</div>`);
+  for (const row of rows) {
+    cells.push(`<div class="year-cal-wk">${row.weekNum}</div>`);
+    const monthStart = row.days.find(dk => dk && dk.endsWith('-01'));
+    const monthLabel = monthStart ? parseDate(monthStart).toLocaleString('sv-SE', { month: 'short' }).replace('.', '') : '';
+    cells.push(`<div class="year-cal-month">${esc(monthLabel)}</div>`);
+    for (let i = 0; i < 7; i++) {
+      const dk = row.days[i];
+      if (!dk) {
+        cells.push(`<div class="year-cal-cell out"></div>`);
+        continue;
+      }
+      const d = parseDate(dk);
+      const weekend = d && (d.getDay() === 0 || d.getDay() === 6);
+      const info = resolveCalendarDay(y, dk, derived);
+      const parts = [];
+      if (info.holidayName) parts.push(info.holidayName);
+      if (info.vacationPi === 'both' || info.vacationPi === pi)
+        parts.push('Semester: ' + state.parents[pi].name);
+      const s = info.parentalSlots[pi];
+      if (s) {
+        const ch = state.children.find(c => c.id === s.ci);
+        parts.push('FP' + (ch ? ' / ' + ch.name : ''));
+      }
+      if (info.overrideRaw === 'off' && info.derivedHasAny) parts.push('(regel dold)');
+      const title = dk + (parts.length ? ' — ' + parts.join(', ') : '');
+      let base = '#f8fafc';
+      if (info.holidayName) base = '#fecaca';
+      else if (weekend) base = '#e2e8f0';
+      const layers = yearCalCellBackgroundLayersForParent(info, pi);
+      const finalStyle = layers.length
+        ? `background-color:${base};background-image:${layers.join(',')}`
+        : `background-color:${base}`;
+      const monthStartCls = d && d.getDate() === 1 ? ' month-start' : '';
+      const cls = 'year-cal-cell' + (weekend ? ' weekend' : '') + monthStartCls;
+      const ev = `onmousedown="actions.calendarCellDown(event,'${esc(dk)}')" onmouseenter="actions.calendarCellEnter('${esc(dk)}')"`;
+      cells.push(`<div class="${cls}" style="${finalStyle}" title="${esc(title)}" data-cal-date="${esc(dk)}" ${ev}></div>`);
+    }
+  }
+  return cells.join('');
+}
+
+function renderYearCalColorLegend() {
+  return '';
+}
+
+function renderYearCalStripLegend() {
+  const fpBits = state.children.map(c => `
+    <span class="inline-flex items-center gap-1">
+      <span class="inline-block w-3 h-3 rounded-sm border border-slate-300 shrink-0" style="background:${yearCalFpColorForChildId(c.id)}"></span>
+      <span>${esc(c.name)}</span>
+    </span>
+  `).join('');
+
+  return `
+    <div class="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-600 items-center">
+      <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm border border-slate-300 shrink-0" style="background:#fecaca"></span>Helgdag</span>
+      <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded-sm border border-slate-300 shrink-0" style="background:${YEAR_CAL_VACATION_RGBA}"></span>Semester</span>
+      ${fpBits}
+    </div>
+  `;
+}
+
+function computeYearCalendarStats(year) {
+  const vac = [0, 0];
+  const parentalByChild = {};
+  const parentalByParent = [0, 0];
+  for (const c of state.children) parentalByChild[c.id] = 0;
+
+  // Vacation year: Apr 1 (year) -> Mar 31 (year + 1)
+  const vacSet0 = vacationDateSetForParent(0);
+  const vacSet1 = vacationDateSetForParent(1);
+  const holMapA = swedishHolidayMapForYear(year);
+  const holMapB = swedishHolidayMapForYear(year + 1);
+  const vacStart = new Date(year, 3, 1);
+  const vacEnd = new Date(year + 1, 2, 31);
+  for (let d = new Date(vacStart.getTime()); d <= vacEnd; d.setDate(d.getDate() + 1)) {
+    if (!isWeekdayDate(d)) continue;
+    const key = toYMD(d);
+    const hol = d.getFullYear() === year ? holMapA[key] : holMapB[key];
+    if (hol) continue;
+    if (vacSet0.has(key)) vac[0]++;
+    if (vacSet1.has(key)) vac[1]++;
+  }
+
+  const timeline = calculateTimeline();
+  for (const m of (timeline.months || [])) {
+    if (m.year !== year) continue;
+    for (const pi of [0, 1]) {
+      const lbc = m.parents[pi].leaveByChild || {};
+      for (const ci in lbc) {
+        const d = (lbc[ci].sjuk || 0) + (lbc[ci].lagsta || 0);
+        parentalByParent[pi] += d;
+        if (parentalByChild[ci] != null) parentalByChild[ci] += d;
+      }
+    }
+  }
+
+  return { vacationWeekdays: vac, parentalByChild, parentalByParent };
+}
+
+let calendarPaint = { active: false, pi: 0, mode: 'vacation', interaction: 'paint', dragAdd: true };
+let calendarSelectedChildId = '';
+let calendarRenderRaf = null;
+
+function scheduleCalendarRender() {
+  if (calendarRenderRaf) return;
+  calendarRenderRaf = requestAnimationFrame(() => {
+    calendarRenderRaf = null;
+    saveState();
+    renderAll();
+  });
+}
+
+document.addEventListener('mouseup', () => {
+  if (calendarRenderRaf) {
+    cancelAnimationFrame(calendarRenderRaf);
+    calendarRenderRaf = null;
+    saveState();
+    renderAll();
+  }
+  calendarPaint.active = false;
+});
 
 function dateToMonthKey(d) {
   return d.getFullYear() * 100 + (d.getMonth() + 1);
@@ -296,6 +878,19 @@ function calculateTimeline() {
       if (!maxDate || d > maxDate) maxDate = new Date(d);
     }
   }
+  for (const [dateKey, v] of Object.entries(state.calendarParentalOverrides || {})) {
+    if (!(v && typeof v === 'object' && v.pi != null && v.ci)) continue;
+    const d = parseDate(dateKey);
+    if (!d) continue;
+    if (!minDate || d < minDate) minDate = new Date(d);
+    if (!maxDate || d > maxDate) maxDate = new Date(d);
+  }
+  for (const seg of (state.calendarVacation || [])) {
+    const a = parseDate(seg.start);
+    const b = parseDate(seg.end);
+    if (a && (!minDate || a < minDate)) minDate = new Date(a);
+    if (b && (!maxDate || b > maxDate)) maxDate = new Date(b);
+  }
   if (!minDate) return { months: [], consumed: {}, warnings: [] };
   if (!maxDate) {
     maxDate = new Date(minDate);
@@ -333,26 +928,45 @@ function calculateTimeline() {
       const leaveByChild = {};
 
       const childIds = new Set(state.children.map(c => c.id));
-      const applicableRules = state.rules.filter(r =>
-        r.pi === pi && r.start && r.end && r.ci && childIds.has(r.ci)
-      );
+      const derivedForYear = deriveParentalFromRules(year);
 
+      const vacSet = vacationDateSetForParent(pi);
+      const prePreschoolWeekKeys = new Set();
       const daysByChild = {};
-      for (const rule of applicableRules) {
-        const rStart = parseDate(rule.start);
-        const rEnd = parseDate(rule.end);
-        if (!rStart || !rEnd) continue;
+      for (let day = 1; day <= mDays; day++) {
+        const dateObj = new Date(year, month - 1, day);
+        const key = toYMD(dateObj);
+        if (vacSet.has(key)) continue;
+        const assignment = resolveParentalAssignment(key, derivedForYear);
+        const p = assignment.slots[pi];
+        if (!p || !childIds.has(p.ci)) continue;
+        if (!daysByChild[p.ci]) daysByChild[p.ci] = 0;
+        daysByChild[p.ci] += 1;
+        const iw = isoWeekNumber(dateObj);
+        const ch = state.children.find(c => c.id === p.ci);
+        const ps = ch && ch.preschoolDate ? parseDate(ch.preschoolDate) : null;
+        if (!ps || dateObj < ps) prePreschoolWeekKeys.add(iw.year + '|' + iw.week);
+        if (!topupMonths[pi][p.ci]) topupMonths[pi][p.ci] = 0;
+      }
 
-        const overlapStart = new Date(Math.max(mStart, rStart));
-        const overlapEnd = new Date(Math.min(mEnd, rEnd));
-        if (overlapStart > overlapEnd) continue;
-
-        const overlapDays = Math.round((overlapEnd - overlapStart) / 86400000) + 1;
-        const leaveDays = overlapDays / 7 * rule.dpw;
-
-        if (!daysByChild[rule.ci]) daysByChild[rule.ci] = 0;
-        daysByChild[rule.ci] += leaveDays;
-        if (!topupMonths[pi][rule.ci]) topupMonths[pi][rule.ci] = 0;
+      let paidCalendarDays = 0;
+      for (let day = 1; day <= mDays; day++) {
+        const dateObj = new Date(year, month - 1, day);
+        const key = toYMD(dateObj);
+        if (vacSet.has(key)) {
+          paidCalendarDays += 1;
+          continue;
+        }
+        const assignment = resolveParentalAssignment(key, derivedForYear);
+        const p = assignment.slots[pi];
+        if (p && childIds.has(p.ci)) {
+          const ch = state.children.find(c => c.id === p.ci);
+          const ps = ch && ch.preschoolDate ? parseDate(ch.preschoolDate) : null;
+          if (ps && dateObj >= ps) continue;
+        }
+        const iw = isoWeekNumber(dateObj);
+        const wkKey = iw.year + '|' + iw.week;
+        if (!prePreschoolWeekKeys.has(wkKey)) paidCalendarDays += 1;
       }
 
       const sjukRate = calcDailyRate(state.parents[pi].salary);
@@ -391,23 +1005,14 @@ function calculateTimeline() {
       const avgDpw = mDays > 0 ? totalLeaveDays / (mDays / 7) : 0;
       const salary = state.parents[pi].salary;
 
-      let fullyOffWork = false;
-      const monthMid = new Date(year, month - 1, 15);
-      for (const ci in leaveByChild) {
-        const child = state.children.find(ch => ch.id === ci);
-        if (child && child.birthDate) {
-          const firstBday = addMonths(child.birthDate, 12);
-          if (firstBday && monthMid < firstBday) {
-            fullyOffWork = true;
-            break;
-          }
-        }
-      }
-
-      const workFraction = fullyOffWork ? 0 : Math.max(0, (5 - Math.min(avgDpw, 5)) / 5);
+      const workFraction = mDays > 0
+        ? Math.max(0, Math.min(1, paidCalendarDays / mDays))
+        : 1;
       const workIncome = workFraction * salary;
 
-      const leaveFrac = fullyOffWork ? 1 : Math.min(avgDpw, 5) / 5;
+      const leaveFrac = mDays > 0
+        ? Math.max(0, Math.min(1, (mDays - paidCalendarDays) / mDays))
+        : 0;
       let topupIncome = 0;
       for (const tu of state.parents[pi].topups) {
         if (leaveByChild[tu.ci] && topupMonths[pi][tu.ci] <= tu.months) {
@@ -597,6 +1202,34 @@ function summaryYearlyPlans() {
   return `${state.yearlyPlans.length} plan(s)`;
 }
 
+function getCalendarYearRange() {
+  const start = Number(state.calendarYearStart) || Number(state.calendarYear) || new Date().getFullYear();
+  const endRaw = Number(state.calendarYearEnd) || start;
+  const end = endRaw < start ? start : endRaw;
+  return { start, end };
+}
+
+function getCalendarYearsPlanned() {
+  const r = getCalendarYearRange();
+  const out = [];
+  for (let y = r.start; y <= r.end; y++) out.push(y);
+  return out;
+}
+
+function summaryYearCalendar() {
+  const years = getCalendarYearsPlanned();
+  const a = years[0], b = years[years.length - 1];
+  let sem0 = 0, sem1 = 0, fp = 0;
+  for (const y of years) {
+    const st = computeYearCalendarStats(y);
+    sem0 += st.vacationWeekdays[0];
+    sem1 += st.vacationWeekdays[1];
+    fp += Object.values(st.parentalByChild).reduce((x, n) => x + n, 0);
+  }
+  const label = a === b ? String(a) : `${a}–${b}`;
+  return `${label} · sem ${Math.round(sem0)}+${Math.round(sem1)} · FP ${Math.round(fp)} dagar`;
+}
+
 function summaryWarnings(warnings) {
   if (!warnings || !warnings.length) return '0 warnings';
   const counts = { error: 0, warn: 0, info: 0 };
@@ -650,7 +1283,8 @@ function renderConfig() {
     collapsible('parents', 'Parents', summaryParents(), renderParents()),
     collapsible('day-pool', 'Day Pool / Used', summaryDayPool(), dayPool || '<p class="text-slate-400 text-sm">Add children to set used days.</p>'),
     collapsible('rules', 'Leave Rules', summaryRules(), renderRules()),
-    collapsible('yearly-plans', 'Planned Yearly Leave', summaryYearlyPlans(), renderYearlyPlans()),
+    collapsible('yearly-plans', 'Dagar per år (kvarvarande)', summaryYearlyPlans(), renderYearlyPlans()),
+    collapsible('year-calendar', 'Årskalender (semester)', summaryYearCalendar(), renderYearCalendarControls()),
   ].join('');
 }
 
@@ -674,11 +1308,14 @@ function renderChildren() {
                 class="px-2 py-1 border border-amber-300 rounded text-sm bg-white" />
               <button onclick="actions.removeChild('${c.id}')" class="text-red-400 hover:text-red-600 text-lg font-bold">&times;</button>
             </div>
-            <div class="flex items-center gap-2">
-              <label class="text-xs text-slate-500 w-24">Preschool start</label>
-              <input type="date" value="${c.preschoolDate || ''}"
-                onchange="actions.updateChild('${c.id}','preschoolDate',this.value)"
-                class="px-2 py-1 border border-amber-300 rounded text-xs bg-white" />
+            <div class="flex flex-col gap-0.5">
+              <div class="flex items-center gap-2">
+                <label class="text-xs text-slate-500 w-24 shrink-0">Preschool start</label>
+                <input type="date" value="${c.preschoolDate || ''}"
+                  onchange="actions.updateChild('${c.id}','preschoolDate',this.value)"
+                  class="px-2 py-1 border border-amber-300 rounded text-xs bg-white" />
+              </div>
+              <p class="text-[10px] text-slate-500 pl-24">Före detta datum: hela veckan utan lön vid FP. Från detta datum: bara FP-dagen själv utan lön (arbetsgivaren betalar övriga dagar).</p>
             </div>
           </div>
         `).join('')}
@@ -833,7 +1470,7 @@ function renderRules() {
         <h2 class="text-lg font-semibold text-slate-900">Leave Rules</h2>
         <button onclick="actions.addRule()" class="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-sm rounded-lg font-medium transition" ${state.children.length === 0 ? 'disabled title="Add a child first"' : ''}>+ Add rule</button>
       </div>
-      <p class="text-xs text-slate-400 mb-3">Define periods of leave: who takes how many days per week, for which child. Sjukpenning days are used first, then lägsta automatically.</p>
+      <p class="text-xs text-slate-400 mb-3">Define periods of leave: who takes how many days per week, for which child. Total leave days for a rule = <strong>ISO weeks that touch the period</strong> × days/week (then split across months by calendar days). Sjukpenning days are used first, then lägsta automatically.</p>
       ${state.rules.length === 0 ? '<p class="text-slate-400 text-sm italic">No leave rules defined yet.</p>' : ''}
       <div class="space-y-3">
         ${state.rules.map((r, ri) => `
@@ -880,10 +1517,178 @@ function renderRules() {
   `;
 }
 
+function renderYearCalendarControls() {
+  const { start, end } = getCalendarYearRange();
+  const yearOpts = [];
+  for (let yy = start - 2; yy <= end + 6; yy++) yearOpts.push(yy);
+  if (!calendarSelectedChildId && state.children[0]) calendarSelectedChildId = state.children[0].id;
+  const modeVac = calendarPaint.mode === 'vacation';
+  const modePar = calendarPaint.mode === 'parental';
+  return `
+    <div class="space-y-3 text-sm">
+      <p class="text-xs text-slate-500">Höger panelen visar <strong>två kalendrar per år</strong> (en per förälder, bredvid varandra). FP från <strong>leave rules</strong> (första <em>avrundade dpw</em> dagar per vecka, inkl. helger). Välj typ, interaktion och <strong>aktiv förälder</strong> när du målar.</p>
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="text-xs text-slate-500">År från</label>
+        <select onchange="actions.setCalendarYearRange('start', Number(this.value))" class="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+          ${yearOpts.map(yy => `<option value="${yy}" ${yy === start ? 'selected' : ''}>${yy}</option>`).join('')}
+        </select>
+        <label class="text-xs text-slate-500">till</label>
+        <select onchange="actions.setCalendarYearRange('end', Number(this.value))" class="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+          ${yearOpts.map(yy => `<option value="${yy}" ${yy === end ? 'selected' : ''}>${yy}</option>`).join('')}
+        </select>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs text-slate-500">Typ</span>
+        <button type="button" onclick="actions.setCalendarPaintMode('vacation')" class="px-2 py-1 rounded text-xs font-medium ${modeVac ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}">Semester</button>
+        <button type="button" onclick="actions.setCalendarPaintMode('parental')" class="px-2 py-1 rounded text-xs font-medium ${modePar ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}">Föräldra</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs text-slate-500">Interaktion</span>
+        <button type="button" onclick="actions.setCalendarInteraction('click')" class="px-2 py-1 rounded text-xs font-medium ${calendarPaint.interaction === 'click' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}">Klicka</button>
+        <button type="button" onclick="actions.setCalendarInteraction('paint')" class="px-2 py-1 rounded text-xs font-medium ${calendarPaint.interaction === 'paint' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}">Måla</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs text-slate-500">Aktiv förälder</span>
+        ${[0, 1].map(pi => `
+          <button type="button" onclick="actions.setCalendarPaintPi(${pi})" class="px-2 py-1 rounded text-xs font-medium parent-${pi} ${calendarPaint.pi === pi ? 'ring-2 ring-offset-1 ring-slate-400' : 'opacity-80'}">${esc(state.parents[pi].name)}</button>
+        `).join('')}
+      </div>
+      ${modePar ? (state.children.length ? `<div class="flex flex-wrap items-center gap-2">
+        <label class="text-xs text-slate-500">Barn (manuell FP-dag)</label>
+        <select onchange="actions.setCalendarPaintChild(this.value)" class="px-2 py-1 border border-slate-300 rounded text-xs bg-white">
+          ${state.children.map(c => `<option value="${esc(c.id)}" ${calendarSelectedChildId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        </select>
+      </div>` : '<p class="text-xs text-amber-700">Lägg till barn för att manuellt lägga FP-dagar.</p>') : ''}
+      <div class="flex flex-wrap gap-2">
+        <button type="button" onclick="actions.resetCalendarParentalOverrides()" class="px-2 py-1 text-xs rounded bg-amber-100 text-amber-900 hover:bg-amber-200" title="Tar bort alla manuella FL-justeringar">Återställ föräldra-justeringar (varning)</button>
+      </div>
+      ${renderYearCalColorLegend()}
+    </div>
+  `;
+}
+
+function renderYearCalendarMain() {
+  const years = getCalendarYearsPlanned();
+  let sem0Total = 0, sem1Total = 0, fp0Total = 0, fp1Total = 0;
+  const yearlyStats = [];
+  const fpByChildTotal = {};
+  for (const c of state.children) fpByChildTotal[c.id] = 0;
+  const yearBlocks = years.map(y => {
+    const st = computeYearCalendarStats(y);
+    sem0Total += st.vacationWeekdays[0];
+    sem1Total += st.vacationWeekdays[1];
+    fp0Total += st.parentalByParent[0];
+    fp1Total += st.parentalByParent[1];
+    yearlyStats.push({ year: y, sem0: st.vacationWeekdays[0], sem1: st.vacationWeekdays[1], fp0: st.parentalByParent[0], fp1: st.parentalByParent[1], child: { ...st.parentalByChild } });
+    for (const c of state.children) fpByChildTotal[c.id] += st.parentalByChild[c.id] || 0;
+    const derived = deriveParentalFromRules(y);
+    const grid0 = buildYearCalGridHtmlForParent(y, derived, 0);
+    const grid1 = buildYearCalGridHtmlForParent(y, derived, 1);
+    const colTpl = '28px 24px repeat(7, 10px)';
+    return `
+      <div class="shrink-0 flex flex-col gap-1">
+        <div class="text-[10px] text-slate-600 font-medium">${y}</div>
+        <div class="flex flex-wrap gap-4 items-start">
+          <div class="year-cal-wrap shrink-0 border border-slate-200 rounded-lg bg-white p-2 parent-0" style="border-color:#bfdbfe;background:#fafcff">
+            <div class="text-[9px] font-semibold text-slate-800 mb-1 truncate max-w-[200px]" title="${esc(state.parents[0].name)}">${esc(state.parents[0].name)}</div>
+            <div class="year-cal-grid" style="grid-template-columns: ${colTpl}; width: max-content;">
+              ${grid0}
+            </div>
+          </div>
+          <div class="year-cal-wrap shrink-0 border border-slate-200 rounded-lg bg-white p-2 parent-1" style="border-color:#fbcfe8;background:#fffafb">
+            <div class="text-[9px] font-semibold text-slate-800 mb-1 truncate max-w-[200px]" title="${esc(state.parents[1].name)}">${esc(state.parents[1].name)}</div>
+            <div class="year-cal-grid" style="grid-template-columns: ${colTpl}; width: max-content;">
+              ${grid1}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  const childRows = state.children.map(c => {
+    const n = fpByChildTotal[c.id] || 0;
+    return `<div class="flex justify-between text-xs"><span>${esc(c.name)}</span><span class="font-medium">${Math.round(n)} dagar</span></div>`;
+  }).join('');
+  return `
+    <div class="space-y-3">
+      <p class="text-xs text-slate-500">Statistik: Semester visas som <strong>vardagar</strong> (mån–fre) exkl. <strong>helgdagar</strong> i semesterår <strong>apr-mar</strong>. Föräldraledighet räknas som <strong>alla dagar</strong>, inklusive helger, per kalenderår.</p>
+      <div class="grid grid-cols-2 gap-3 text-xs">
+        <div class="p-3 rounded-lg border parent-0" style="background:#eff6ff;border-color:#bfdbfe">
+          <div class="font-medium text-slate-800 mb-1">${esc(state.parents[0].name)}</div>
+          <div>Semester (apr-mar): <strong>${Math.round(sem0Total)}</strong> vardagar</div>
+          <div>Föräldraledighet: <strong>${Math.round(fp0Total)}</strong> dagar</div>
+        </div>
+        <div class="p-3 rounded-lg border parent-1" style="background:#fdf2f8;border-color:#fbcfe8">
+          <div class="font-medium text-slate-800 mb-1">${esc(state.parents[1].name)}</div>
+          <div>Semester (apr-mar): <strong>${Math.round(sem1Total)}</strong> vardagar</div>
+          <div>Föräldraledighet: <strong>${Math.round(fp1Total)}</strong> dagar</div>
+        </div>
+      </div>
+      <div class="p-3 rounded-lg border border-slate-200 bg-white">
+        <div class="text-xs font-semibold text-slate-700 mb-2">Per år</div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-xs">
+            <thead>
+              <tr class="text-slate-500 border-b border-slate-200">
+                <th class="text-left py-1 pr-3">År</th>
+                <th class="text-right py-1 px-2">Sem (apr-mar) ${esc(state.parents[0].name)}</th>
+                <th class="text-right py-1 px-2">Sem (apr-mar) ${esc(state.parents[1].name)}</th>
+                <th class="text-right py-1 px-2">FL ${esc(state.parents[0].name)}</th>
+                <th class="text-right py-1 pl-2">FL ${esc(state.parents[1].name)}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${yearlyStats.map(r => `
+                <tr class="border-b border-slate-100">
+                  <td class="py-1 pr-3 text-slate-700">${r.year}</td>
+                  <td class="py-1 px-2 text-right">${Math.round(r.sem0)}</td>
+                  <td class="py-1 px-2 text-right">${Math.round(r.sem1)}</td>
+                  <td class="py-1 px-2 text-right">${Math.round(r.fp0)}</td>
+                  <td class="py-1 pl-2 text-right">${Math.round(r.fp1)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      ${state.children.length ? `<div class="p-3 rounded-lg border border-amber-200 bg-amber-50">
+        <div class="text-xs font-semibold text-amber-900 mb-2">Föräldraledighet per barn (summa båda föräldrar)</div>
+        ${childRows || '<p class="text-xs text-slate-500">Inga barn</p>'}
+      </div>
+      <div class="p-3 rounded-lg border border-amber-200 bg-white">
+        <div class="text-xs font-semibold text-amber-900 mb-2">Föräldraledighet per år och barn</div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-xs">
+            <thead>
+              <tr class="text-slate-500 border-b border-slate-200">
+                <th class="text-left py-1 pr-3">År</th>
+                ${state.children.map(c => `<th class="text-right py-1 px-2">${esc(c.name)}</th>`).join('')}
+              </tr>
+            </thead>
+            <tbody>
+              ${yearlyStats.map(r => `
+                <tr class="border-b border-slate-100">
+                  <td class="py-1 pr-3 text-slate-700">${r.year}</td>
+                  ${state.children.map(c => `<td class="py-1 px-2 text-right">${Math.round((r.child && r.child[c.id]) || 0)}</td>`).join('')}
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>` : ''}
+      ${renderYearCalStripLegend()}
+      <div class="flex gap-2 overflow-x-auto">
+        ${yearBlocks.join('')}
+      </div>
+    </div>
+  `;
+}
+
 function renderYearlyPlans() {
   return `
     <div class="flex items-center justify-between mb-2">
-      <h3 class="text-sm font-semibold text-slate-700">Planned yearly leave</h3>
+      <h3 class="text-sm font-semibold text-slate-700">Dagar per år (kvarvarande dagar)</h3>
       <button onclick="actions.addYearlyPlan()" class="text-xs px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-600">+ Add</button>
     </div>
     ${(!state.yearlyPlans || state.yearlyPlans.length === 0) ? '<p class="text-xs text-slate-400 italic mb-1">No fixed plans. Days will be distributed evenly.</p>' : ''}
@@ -907,14 +1712,16 @@ function renderYearlyPlans() {
 }
 
 function renderResults(timeline) {
+  const yearCal = collapsible('year-calendar-view', 'Årskalender', summaryYearCalendar(), renderYearCalendarMain());
   if (!timeline || !timeline.months.length) {
-    return collapsible('warnings', 'Warnings', '0 warnings', '<div class="text-center py-8 text-slate-400">Add children and leave rules to see results.</div>');
+    return yearCal + collapsible('warnings', 'Warnings', '0 warnings', '<div class="text-center py-8 text-slate-400">Add children and leave rules to see results.</div>');
   }
   const warningsHtml = renderWarnings(timeline.warnings);
   const dayBalanceHtml = renderDayBalance(timeline.consumed);
   const remainingHtml = renderRemainingDays(timeline.consumed, timeline.months);
   const timelineHtml = renderTimeline(timeline.months);
   return [
+    yearCal,
     collapsible('warnings', 'Warnings', summaryWarnings(timeline.warnings), warningsHtml || '<p class="text-slate-400 text-sm">No warnings.</p>'),
     collapsible('day-balance', 'Day Balance', summaryDayBalance(timeline.consumed), dayBalanceHtml),
     collapsible('monthly-overview', 'Monthly Overview', summaryMonthlyOverview(timeline.months), timelineHtml),
@@ -1026,23 +1833,23 @@ function renderRemainingDays(consumed, months) {
   const children = state.children.filter(c => c.birthDate);
   if (!children.length) return '';
 
-  const rulesByYear = {};
+  const calendarByYear = {};
   for (const m of (months || [])) {
     const y = m.year;
-    if (!rulesByYear[y]) rulesByYear[y] = { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
+    if (!calendarByYear[y]) calendarByYear[y] = { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
     for (const pi of [0, 1]) {
       const lbc = m.parents[pi].leaveByChild || {};
       for (const ci in lbc) {
         const child = state.children.find(c => c.id === ci);
         const name = child ? child.name : ci;
-        if (!rulesByYear[y].byChild[name]) rulesByYear[y].byChild[name] = { total: 0, sjuk: 0, lagsta: 0 };
+        if (!calendarByYear[y].byChild[name]) calendarByYear[y].byChild[name] = { total: 0, sjuk: 0, lagsta: 0 };
         const d = lbc[ci].sjuk + lbc[ci].lagsta;
-        rulesByYear[y].total += d;
-        rulesByYear[y].sjuk += lbc[ci].sjuk;
-        rulesByYear[y].lagsta += lbc[ci].lagsta;
-        rulesByYear[y].byChild[name].total += d;
-        rulesByYear[y].byChild[name].sjuk += lbc[ci].sjuk;
-        rulesByYear[y].byChild[name].lagsta += lbc[ci].lagsta;
+        calendarByYear[y].total += d;
+        calendarByYear[y].sjuk += lbc[ci].sjuk;
+        calendarByYear[y].lagsta += lbc[ci].lagsta;
+        calendarByYear[y].byChild[name].total += d;
+        calendarByYear[y].byChild[name].sjuk += lbc[ci].sjuk;
+        calendarByYear[y].byChild[name].lagsta += lbc[ci].lagsta;
       }
     }
   }
@@ -1259,7 +2066,7 @@ function renderRemainingDays(consumed, months) {
 
   const totalValue = Math.round(totalRemSjuk * avgSjukRate + totalRemLagsta * FK.LAGSTA_DAILY);
   const yearSlotsWithRules = yearSlots.map(s => {
-    const r = rulesByYear[s.year] || { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
+    const r = calendarByYear[s.year] || { total: 0, sjuk: 0, lagsta: 0, byChild: {} };
     return { ...s, rulesTotal: r.total, rulesSjuk: r.sjuk, rulesLagsta: r.lagsta, rulesByChild: r.byChild };
   });
   const maxDays = Math.max(...yearSlotsWithRules.map(s => s.total + s.rulesTotal), 1);
@@ -1297,7 +2104,7 @@ function renderRemainingDays(consumed, months) {
         </div>
       ` : ''}
 
-      <h3 class="text-sm font-semibold text-slate-700 mb-2">Yearly plan (leave rules + suggested)</h3>
+      <h3 class="text-sm font-semibold text-slate-700 mb-2">Yearly plan (Årskalender + suggested)</h3>
       <div class="space-y-1.5">
         ${yearSlotsWithRules.filter(s => s.total > 0 || s.rulesTotal > 0).map(s => {
           const totalDays = s.total + s.rulesTotal;
@@ -1322,7 +2129,7 @@ function renderRemainingDays(consumed, months) {
               <div class="flex items-center gap-2 py-1.5 px-2">
                 <span class="w-10 text-sm font-medium flex-shrink-0 ${s.fixed ? 'text-violet-700' : 'text-slate-700'}">${s.year}</span>
                 <div class="flex-1 h-3 bg-slate-100 rounded-full overflow-hidden flex">
-                  <div class="bar h-full rounded-full" style="width:${rulesPct}%;background:#94a3b8" title="Leave rules"></div>
+                  <div class="bar h-full rounded-full" style="width:${rulesPct}%;background:#94a3b8" title="Planned in Årskalender"></div>
                   <div class="bar h-full rounded-full" style="width:${sjukPct}%;background:#2563eb" title="Suggested sjukpenning"></div>
                   <div class="bar h-full rounded-full" style="width:${lagstaPct}%;background:#f59e0b" title="Suggested lägstanivå"></div>
                 </div>
@@ -1332,7 +2139,7 @@ function renderRemainingDays(consumed, months) {
               </div>
               <div class="yr-detail hidden px-2 pb-2 pt-0.5 ml-10">
                 <div class="text-xs text-slate-500 pl-2 border-l-2 border-slate-200 space-y-0.5">
-                  ${s.rulesTotal > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span><strong>Leave rules:</strong> ' + Math.round(s.rulesTotal) + ' days' + (rulesNote ? ' (' + rulesNote + ')' : '') + '</div>' : ''}
+                  ${s.rulesTotal > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span><strong>Planned in Årskalender:</strong> ' + Math.round(s.rulesTotal) + ' days' + (rulesNote ? ' (' + rulesNote + ')' : '') + '</div>' : ''}
                   ${s.sjuk > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>' + Math.round(s.sjuk) + ' sjukpenning suggested (' + formatKr(Math.round(s.sjuk * avgSjukRate)) + ' kr)</div>' : ''}
                   ${s.lagsta > 0 ? '<div><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>' + Math.round(s.lagsta) + ' lägstanivå suggested (' + formatKr(Math.round(s.lagsta * FK.LAGSTA_DAILY)) + ' kr)</div>' : ''}
                   ${sourceNote ? '<div class="text-slate-400 mt-0.5"><strong>Suggested from:</strong> ' + sourceNote + '</div>' : ''}
@@ -1342,7 +2149,7 @@ function renderRemainingDays(consumed, months) {
         }).join('')}
       </div>
       <div class="flex items-center gap-4 mt-3 text-xs text-slate-400 justify-center">
-        <span><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span>Leave rules</span>
+        <span><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span>Årskalender plan</span>
         <span><span class="inline-block w-2 h-2 rounded-full bg-blue-600 mr-1"></span>Sjukpenning</span>
         <span><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>Lägstanivå</span>
       </div>
@@ -1371,7 +2178,8 @@ function renderTimeline(months) {
 
   return `
     <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
-      <h2 class="text-lg font-semibold text-slate-900 mb-4">Monthly Overview</h2>
+      <h2 class="text-lg font-semibold text-slate-900 mb-2">Monthly Overview</h2>
+      <p class="text-xs text-slate-500 mb-4 max-w-3xl">Arbetsgivar-lön (Work) skalar med betalda kalenderdagar. <strong>Före förskolestart</strong> (eller om den saknas): hela ISO-veckan räknas som obetald om det finns FP någon dag i veckan. <strong>Från och med förskolestart</strong>: bara FP-dagen själv räknas som obetald. Semester och FK-ersättning påverkas inte.</p>
       <div class="flex items-center gap-2 py-1 px-2 mb-1 text-xs text-slate-400">
         <span class="flex-shrink-0" style="width:5.5rem"></span>
         <span class="flex-1"></span>
@@ -1539,6 +2347,23 @@ window.actions = {
     for (const p of state.parents) {
       p.topups = p.topups.filter(t => t.ci !== id);
     }
+    if (state.calendarParentalOverrides && typeof state.calendarParentalOverrides === 'object') {
+      const next = {};
+      for (const [k, v] of Object.entries(state.calendarParentalOverrides)) {
+        if (v && typeof v === 'object' && v.pi != null && v.ci === id && !('0' in v) && !('1' in v)) continue;
+        if (v && typeof v === 'object' && ('0' in v || '1' in v)) {
+          const nv = { ...v };
+          if (nv[0] === id) nv[0] = null;
+          if (nv[1] === id) nv[1] = null;
+          if (nv[0] == null && nv[1] == null) continue;
+          next[k] = nv;
+          continue;
+        }
+        next[k] = v;
+      }
+      state.calendarParentalOverrides = next;
+    }
+    if (calendarSelectedChildId === id) calendarSelectedChildId = state.children[0] ? state.children[0].id : '';
     saveState();
     renderAll();
   },
@@ -1638,7 +2463,152 @@ window.actions = {
     saveState();
     renderAll();
   },
+  setCalendarYear(y) {
+    state.calendarYear = y;
+    state.calendarYearStart = y;
+    state.calendarYearEnd = y;
+    saveState();
+    renderAll();
+  },
+  setCalendarYearRange(bound, y) {
+    if (bound === 'start') state.calendarYearStart = y;
+    else state.calendarYearEnd = y;
+    if ((state.calendarYearEnd || y) < (state.calendarYearStart || y)) {
+      if (bound === 'start') state.calendarYearEnd = state.calendarYearStart;
+      else state.calendarYearStart = state.calendarYearEnd;
+    }
+    state.calendarYear = state.calendarYearStart;
+    saveState();
+    renderAll();
+  },
+  setCalendarPaintMode(mode) {
+    calendarPaint.mode = mode;
+    renderAll();
+  },
+  setCalendarInteraction(interaction) {
+    calendarPaint.interaction = interaction;
+    renderAll();
+  },
+  setCalendarPaintPi(pi) {
+    calendarPaint.pi = pi;
+    renderAll();
+  },
+  setCalendarPaintChild(cid) {
+    calendarSelectedChildId = cid;
+    renderAll();
+  },
+  resetCalendarParentalOverrides() {
+    const ok = window.confirm('Detta tar bort alla manuella föräldra-justeringar i Årskalendern. Vill du fortsätta?');
+    if (!ok) return;
+    state.calendarParentalOverrides = {};
+    saveState();
+    renderAll();
+  },
+  calendarCellDown(ev, dateKey) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+
+    if (calendarPaint.interaction === 'click') {
+      if (calendarPaint.mode === 'vacation') {
+        applyVacationPaint(calendarPaint.pi, dateKey, !vacationDateSetForParent(calendarPaint.pi).has(dateKey));
+      } else {
+        actions.cycleParentalOverride(dateKey);
+      }
+      scheduleCalendarRender();
+      return;
+    }
+
+    // paint interaction
+    calendarPaint.active = true;
+    if (calendarPaint.mode === 'vacation') {
+      const has = vacationDateSetForParent(calendarPaint.pi).has(dateKey);
+      calendarPaint.dragAdd = !has;
+      applyVacationPaint(calendarPaint.pi, dateKey, calendarPaint.dragAdd);
+    } else {
+      const d = parseDate(dateKey);
+      const y = d ? d.getFullYear() : (state.calendarYear || new Date().getFullYear());
+      const resolved = resolveParentalAssignment(dateKey, deriveParentalFromRules(y));
+      const ciSel = calendarSelectedChildId || (state.children[0] && state.children[0].id);
+      const cur = resolved.slots[calendarPaint.pi];
+      const wantAdd = !cur || cur.ci !== ciSel;
+      calendarPaint.dragAdd = wantAdd;
+      applyParentalPaint(dateKey, wantAdd);
+    }
+    scheduleCalendarRender();
+  },
+  calendarCellEnter(dateKey) {
+    if (!calendarPaint.active || calendarPaint.interaction !== 'paint') return;
+    if (calendarPaint.mode === 'vacation') applyVacationPaint(calendarPaint.pi, dateKey, calendarPaint.dragAdd);
+    else applyParentalPaint(dateKey, calendarPaint.dragAdd);
+    scheduleCalendarRender();
+  },
+  cycleParentalOverride(dateKey) {
+    const d = parseDate(dateKey);
+    const y = d ? d.getFullYear() : (state.calendarYear || new Date().getFullYear());
+    const derived = deriveParentalFromRules(y);
+    const childIds = childIdSet();
+    const der = derived[dateKey] || {};
+    const hasDer = !!(derivedCiForParent(der, 0, childIds) || derivedCiForParent(der, 1, childIds));
+    const ovr = (state.calendarParentalOverrides || {})[dateKey];
+    const ci = calendarSelectedChildId || (state.children[0] && state.children[0].id);
+    const pi = calendarPaint.pi;
+    if (!state.calendarParentalOverrides || typeof state.calendarParentalOverrides !== 'object') state.calendarParentalOverrides = {};
+    if (ovr === undefined) {
+      if (hasDer) state.calendarParentalOverrides[dateKey] = 'off';
+      else if (ci) {
+        if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
+        const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
+        slots[pi] = { pi, ci };
+        writeParentalOverrideFromSlots(dateKey, derived, slots);
+      }
+    } else if (ovr === 'off') {
+      if (ci) {
+        if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
+        const slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
+        slots[pi] = { pi, ci };
+        writeParentalOverrideFromSlots(dateKey, derived, slots);
+      }
+    } else if (typeof ovr === 'object') {
+      delete state.calendarParentalOverrides[dateKey];
+    }
+    saveState();
+    renderAll();
+  },
 };
+
+function applyVacationPaint(pi, dateKey, add) {
+  const has = vacationDateSetForParent(pi).has(dateKey);
+  if (add) {
+    clearParentalForParentOnDate(pi, dateKey);
+    if (!has) toggleVacationDay(pi, dateKey);
+  } else if (has) {
+    toggleVacationDay(pi, dateKey);
+  }
+}
+
+
+function applyParentalPaint(dateKey, add) {
+  const d = parseDate(dateKey);
+  const y = d ? d.getFullYear() : (state.calendarYear || new Date().getFullYear());
+  const derived = deriveParentalFromRules(y);
+  const ci = calendarSelectedChildId || (state.children[0] && state.children[0].id);
+  const pi = calendarPaint.pi;
+  if (!ci) return;
+  if (!state.calendarParentalOverrides || typeof state.calendarParentalOverrides !== 'object') state.calendarParentalOverrides = {};
+
+  let slots = resolveParentalSlotsBeforeVacation(dateKey, derived);
+
+  if (add) {
+    if (vacationDateSetForParent(pi).has(dateKey)) toggleVacationDay(pi, dateKey);
+    slots = { ...slots, [pi]: { pi, ci } };
+    writeParentalOverrideFromSlots(dateKey, derived, slots);
+    return;
+  }
+
+  if (!slots[pi]) return;
+  slots = { ...slots, [pi]: null };
+  writeParentalOverrideFromSlots(dateKey, derived, slots);
+}
 
 function renderAll() {
   state.rules.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
@@ -1648,9 +2618,42 @@ function renderAll() {
   document.getElementById('right-pane').innerHTML = renderResults(timeline);
 }
 
+
+function initPaneDivider() {
+  const divider = document.getElementById('pane-divider');
+  const left = document.getElementById('left-pane');
+  const right = document.getElementById('right-pane');
+  const row = document.getElementById('pane-row');
+  if (!divider || !left || !right || !row) return;
+
+  let dragging = false;
+  divider.addEventListener('mousedown', (e) => {
+    if (window.innerWidth < 1024) return;
+    dragging = true;
+    divider.classList.add('dragging');
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const rect = row.getBoundingClientRect();
+    const pct = ((e.clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(20, Math.min(65, pct));
+    left.style.flex = `0 0 ${clamped}%`;
+    right.style.flex = `0 0 ${100 - clamped}%`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    divider.classList.remove('dragging');
+  });
+}
+
 // --- INIT ---
 loadState();
 renderAll();
+initPaneDivider();
 ensureKommunerLoaded().then(() => {
   for (const p of state.parents) {
     const tn = getTabellNr(p.kommun, p.forsamling, p.churchTax);
